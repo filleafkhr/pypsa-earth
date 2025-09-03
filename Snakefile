@@ -61,7 +61,7 @@ RESDIR = config["results_dir"].strip("/") + f"/{SECDIR}"
 load_data_paths = get_load_paths_gegis("data", config)
 
 if config["enable"].get("retrieve_cost_data", True):
-    COSTS = "resources/" + RDIR + f"costs_{config['costs']['year']}.csv"
+    COSTS = "resources/" + RDIR + f"costs_{config['costs']['year']}_fin.csv"
 else:
     COSTS = "data/costs.csv"
 ATLITE_NPROCESSES = config["atlite"].get("nprocesses", 4)
@@ -259,6 +259,7 @@ rule build_shapes:
     script:
         "scripts/build_shapes.py"
 
+USE_PREBUILT = bool(config.get("base_network", {}).get("name"))
 
 rule base_network:
     params:
@@ -271,16 +272,20 @@ rule base_network:
         countries=config["countries"],
         base_network=config["base_network"],
     input:
-        osm_buses="resources/" + RDIR + "base_network/all_buses_build_network.csv",
-        osm_lines="resources/" + RDIR + "base_network/all_lines_build_network.csv",
-        osm_converters="resources/"
-        + RDIR
-        + "base_network/all_converters_build_network.csv",
-        osm_transformers="resources/"
-        + RDIR
-        + "base_network/all_transformers_build_network.csv",
-        country_shapes="resources/" + RDIR + "shapes/country_shapes.geojson",
-        offshore_shapes="resources/" + RDIR + "shapes/offshore_shapes.geojson",
+        osm_buses = (lambda wc:
+            f"resources/{RDIR}base_network/{config['base_network']['name']}/all_buses_build_network.csv"
+            if USE_PREBUILT else f"resources/{RDIR}base_network/all_buses_build_network.csv"),
+        osm_lines = (lambda wc:
+            f"resources/{RDIR}base_network/{config['base_network']['name']}/all_lines_build_network.csv"
+            if USE_PREBUILT else f"resources/{RDIR}base_network/all_lines_build_network.csv"),
+        osm_converters = (lambda wc:
+            f"resources/{RDIR}base_network/{config['base_network']['name']}/all_converters_build_network.csv"
+            if USE_PREBUILT else f"resources/{RDIR}base_network/all_converters_build_network.csv"),
+        osm_transformers = (lambda wc:
+            f"resources/{RDIR}base_network/{config['base_network']['name']}/all_transformers_build_network.csv"
+            if USE_PREBUILT else f"resources/{RDIR}base_network/all_transformers_build_network.csv"),
+        country_shapes   = f"resources/{RDIR}shapes/country_shapes.geojson",
+        offshore_shapes  = f"resources/{RDIR}shapes/offshore_shapes.geojson",
     output:
         "networks/" + RDIR + "base.nc",
     log:
@@ -413,6 +418,22 @@ rule build_bus_regions:
     script:
         "scripts/build_bus_regions.py"
 
+rule base_cleanup:
+    params:
+        base_network=config["base_network"],
+    input:
+        network="networks/" + RDIR + "base_extended.nc",
+    output:
+        network="networks/" + RDIR + "base_extended_clean.nc",
+    log:
+        "logs/" + RDIR + "base_cleanup.log",
+    benchmark:
+        "benchmarks/" + RDIR + "base_cleanup"
+    threads: 1
+    resources:
+        mem_mb=1000,
+    script:
+        "scripts/base_cleanup.py"
 
 def terminate_if_cutout_exists(config=config):
     """
@@ -510,6 +531,24 @@ if config["enable"].get("retrieve_cost_data", True):
         run:
             move(input[0], output[0])
 
+    rule append_cost_data:
+        params:
+            discount_rate=config["costs"]["discountrate"],
+            regional_factor=config["costs"]["regional_factor"],
+        input:
+            costs="resources/" + RDIR + "costs_{year}.csv",
+            app_costs="data/AEO8-input/AEO8_Table_D15_Cost_Summary.csv",
+            declining_factor="data/AEO8-input/AEO8_Table_D17_Declining_Factor.csv",
+            regional_factor="data/AEO8-input/AEO8_Table_D18_Regional_Factor.csv",
+        output:
+            "resources/" + RDIR + "costs_{year}_fin.csv",
+        log:
+            "logs/" + RDIR + "append_cost_data_{year}.log",
+        resources:
+            mem_mb=3000,
+        script:
+            "scripts/append_cost_data.py"
+
 
 rule build_demand_profiles:
     params:
@@ -537,42 +576,42 @@ rule build_demand_profiles:
     script:
         "scripts/build_demand_profiles.py"
 
-
-rule build_renewable_profiles:
-    params:
-        crs=config["crs"],
-        renewable=config["renewable"],
-        countries=config["countries"],
-        alternative_clustering=config["cluster_options"]["alternative_clustering"],
-    input:
-        natura="resources/" + RDIR + "natura.tiff",
-        copernicus="data/copernicus/PROBAV_LC100_global_v3.0.1_2019-nrt_Discrete-Classification-map_EPSG-4326.tif",
-        gebco="data/gebco/GEBCO_2021_TID.nc",
-        country_shapes="resources/" + RDIR + "shapes/country_shapes.geojson",
-        offshore_shapes="resources/" + RDIR + "shapes/offshore_shapes.geojson",
-        hydro_capacities="data/hydro_capacities.csv",
-        eia_hydro_generation="data/eia_hydro_annual_generation.csv",
-        powerplants="resources/" + RDIR + "powerplants.csv",
-        regions=lambda w: (
-            "resources/" + RDIR + "bus_regions/regions_onshore.geojson"
-            if w.technology in ("onwind", "solar", "hydro", "csp")
-            else "resources/" + RDIR + "bus_regions/regions_offshore.geojson"
-        ),
-        cutout=lambda w: "cutouts/"
-        + CDIR
-        + config["renewable"][w.technology]["cutout"]
-        + ".nc",
-    output:
-        profile="resources/" + RDIR + "renewable_profiles/profile_{technology}.nc",
-    log:
-        "logs/" + RDIR + "build_renewable_profile_{technology}.log",
-    benchmark:
-        "benchmarks/" + RDIR + "build_renewable_profiles_{technology}"
-    threads: ATLITE_NPROCESSES
-    resources:
-        mem_mb=ATLITE_NPROCESSES * 5000,
-    script:
-        "scripts/build_renewable_profiles.py"
+if config["enable"].get("renewable_profiles", True):
+    rule build_renewable_profiles:
+        params:
+            crs=config["crs"],
+            renewable=config["renewable"],
+            countries=config["countries"],
+            alternative_clustering=config["cluster_options"]["alternative_clustering"],
+        input:
+            natura="resources/" + RDIR + "natura.tiff",
+            copernicus="data/copernicus/PROBAV_LC100_global_v3.0.1_2019-nrt_Discrete-Classification-map_EPSG-4326.tif",
+            gebco="data/gebco/GEBCO_2021_TID.nc",
+            country_shapes="resources/" + RDIR + "shapes/country_shapes.geojson",
+            offshore_shapes="resources/" + RDIR + "shapes/offshore_shapes.geojson",
+            hydro_capacities="data/hydro_capacities.csv",
+            eia_hydro_generation="data/eia_hydro_annual_generation.csv",
+            powerplants="resources/" + RDIR + "powerplants.csv",
+            regions=lambda w: (
+                "resources/" + RDIR + "bus_regions/regions_onshore.geojson"
+                if w.technology in ("onwind", "solar", "hydro", "csp")
+                else "resources/" + RDIR + "bus_regions/regions_offshore.geojson"
+            ),
+            cutout=lambda w: "cutouts/"
+            + CDIR
+            + config["renewable"][w.technology]["cutout"]
+            + ".nc",
+        output:
+            profile="resources/" + RDIR + "renewable_profiles/profile_{technology}.nc",
+        log:
+            "logs/" + RDIR + "build_renewable_profile_{technology}.log",
+        benchmark:
+            "benchmarks/" + RDIR + "build_renewable_profiles_{technology}"
+        threads: ATLITE_NPROCESSES
+        resources:
+            mem_mb=ATLITE_NPROCESSES * 5000,
+        script:
+            "scripts/build_renewable_profiles.py"
 
 
 rule build_powerplants:
@@ -586,7 +625,11 @@ rule build_powerplants:
         base_network="networks/" + RDIR + "base_extended.nc",
         pm_config="configs/powerplantmatching_config.yaml",
         custom_powerplants="data/custom_powerplants.csv",
-        osm_powerplants="resources/" + RDIR + "osm/clean/all_clean_generators.csv",
+        osm_powerplants = (
+            f"resources/{RDIR}base_network/{config['base_network']['name']}/all_clean_generators.csv"
+            if USE_PREBUILT else
+            "resources/" + RDIR + "osm/clean/all_clean_generators.csv"
+        ),
         #gadm_shapes="resources/" + RDIR + "shapes/MAR2.geojson",
         #using this line instead of the following will test updated gadm shapes for MA.
         #To use: downlaod file from the google drive and place it in resources/" + RDIR + "shapes/
@@ -1321,8 +1364,8 @@ rule prepare_transport_data:
         energy_totals_name="resources/"
         + SECDIR
         + "energy_totals_{demand}_{planning_horizons}.csv",
-        traffic_data_KFZ="data/emobility/KFZ__count",
-        traffic_data_Pkw="data/emobility/Pkw__count",
+        traffic_data_KFZ="data/emobility/KFZ_ASEAN",
+        traffic_data_Pkw="data/emobility/Pkw_ASEAN",
         transport_name="resources/" + SECDIR + "transport_data.csv",
         clustered_pop_layout="resources/"
         + SECDIR
