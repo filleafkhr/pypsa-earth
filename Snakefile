@@ -1526,49 +1526,49 @@ rule prepare_energy_totals:
     script:
         "scripts/prepare_energy_totals.py"
 
-
-rule build_solar_thermal_profiles:
-    params:
-        solar_thermal_config=config["solar_thermal"],
-        snapshots=config["snapshots"],
-    input:
-        pop_layout_total="resources/"
-        + SECDIR
-        + "population_shares/pop_layout_total_{planning_horizons}.nc",
-        pop_layout_urban="resources/"
-        + SECDIR
-        + "population_shares/pop_layout_urban_{planning_horizons}.nc",
-        pop_layout_rural="resources/"
-        + SECDIR
-        + "population_shares/pop_layout_rural_{planning_horizons}.nc",
-        regions_onshore="resources/"
-        + RDIR
-        + "bus_regions/regions_onshore_elec_s{simpl}_{clusters}.geojson",
-        cutout="cutouts/"
-        + CDIR
-        + [c["cutout"] for _, c in config["renewable"].items()][0]
-        + ".nc",
-        # default to first cutout found
-    output:
-        solar_thermal_total="resources/"
-        + SECDIR
-        + "demand/heat/solar_thermal_total_elec_s{simpl}_{clusters}_{planning_horizons}.nc",
-        solar_thermal_urban="resources/"
-        + SECDIR
-        + "demand/heat/solar_thermal_urban_elec_s{simpl}_{clusters}_{planning_horizons}.nc",
-        solar_thermal_rural="resources/"
-        + SECDIR
-        + "demand/heat/solar_thermal_rural_elec_s{simpl}_{clusters}_{planning_horizons}.nc",
-    resources:
-        mem_mb=20000,
-    benchmark:
-        (
-            "benchmarks/"
+if config["enable"].get("renewable_profiles", True):
+    rule build_solar_thermal_profiles:
+        params:
+            solar_thermal_config=config["solar_thermal"],
+            snapshots=config["snapshots"],
+        input:
+            pop_layout_total="resources/"
             + SECDIR
-            + "build_solar_thermal_profiles/s{simpl}_{clusters}_{planning_horizons}"
-        )
-    script:
-        "scripts/build_solar_thermal_profiles.py"
+            + "population_shares/pop_layout_total_{planning_horizons}.nc",
+            pop_layout_urban="resources/"
+            + SECDIR
+            + "population_shares/pop_layout_urban_{planning_horizons}.nc",
+            pop_layout_rural="resources/"
+            + SECDIR
+            + "population_shares/pop_layout_rural_{planning_horizons}.nc",
+            regions_onshore="resources/"
+            + RDIR
+            + "bus_regions/regions_onshore_elec_s{simpl}_{clusters}.geojson",
+            cutout="cutouts/"
+            + CDIR
+            + [c["cutout"] for _, c in config["renewable"].items()][0]
+            + ".nc",
+            # default to first cutout found
+        output:
+            solar_thermal_total="resources/"
+            + SECDIR
+            + "demand/heat/solar_thermal_total_elec_s{simpl}_{clusters}_{planning_horizons}.nc",
+            solar_thermal_urban="resources/"
+            + SECDIR
+            + "demand/heat/solar_thermal_urban_elec_s{simpl}_{clusters}_{planning_horizons}.nc",
+            solar_thermal_rural="resources/"
+            + SECDIR
+            + "demand/heat/solar_thermal_rural_elec_s{simpl}_{clusters}_{planning_horizons}.nc",
+        resources:
+            mem_mb=20000,
+        benchmark:
+            (
+                "benchmarks/"
+                + SECDIR
+                + "build_solar_thermal_profiles/s{simpl}_{clusters}_{planning_horizons}"
+            )
+        script:
+            "scripts/build_solar_thermal_profiles.py"
 
 
 rule build_population_layouts:
