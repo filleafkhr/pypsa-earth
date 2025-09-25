@@ -311,8 +311,26 @@ def enforce_autarky(n, only_crossborder=False):
 
 
 def set_line_nom_max(n, s_nom_max_set=np.inf, p_nom_max_set=np.inf):
-    n.lines.s_nom_max = n.lines.s_nom_max.clip(upper=s_nom_max_set)
-    n.links.p_nom_max = n.links.p_nom_max.clip(upper=p_nom_max_set)
+    # Lines: scale or clip
+    if not np.isinf(s_nom_max_set):
+        n.lines["s_nom_max"] = np.where(
+            n.lines["s_nom"] > 0,
+            n.lines["s_nom"] * s_nom_max_set,
+            np.inf  # keep as inf if base capacity is 0
+        )
+    else:
+        n.lines["s_nom_max"] = n.lines["s_nom_max"].clip(upper=s_nom_max_set)
+
+    # Links: scale or clip
+    if not np.isinf(p_nom_max_set):
+        n.links["p_nom_max"] = np.where(
+            n.links["p_nom"] > 0,
+            n.links["p_nom"] * p_nom_max_set,
+            np.inf
+        )
+    else:
+        n.links["p_nom_max"] = n.links["p_nom_max"].clip(upper=p_nom_max_set)
+
 
 
 if __name__ == "__main__":
@@ -373,8 +391,30 @@ if __name__ == "__main__":
                     co2limit = co2limit * float(m[0])
                 logger.info("Setting CO2 limit according to emission base year.")
             elif len(m) > 0:
-                co2limit = float(m[0]) * float(snakemake.params.electricity["co2base"])
-                logger.info("Setting CO2 limit according to wildcard value.")
+                wildcard_target = float(m[0])
+                try:
+                    year = int(snakemake.wildcards.planning_horizons)
+                except AttributeError:
+                    year = snakemake.params.get("prediction_year", 2050)
+
+                co2base = float(snakemake.params.electricity["co2base"])
+                use_relative = snakemake.params.electricity.get("use_relative_targets", False)
+                relative_targets = snakemake.params.electricity.get("co2_relative_targets", {})
+
+                if use_relative:
+                    progress = float(relative_targets.get(year, 1.0))  # default = full progress
+                    interpolated_factor = (1 - progress) * 1.0 + progress * wildcard_target
+                    co2limit = interpolated_factor * co2base
+                    logger.info(
+                        f"Year {year}: Progress {100*progress:.0f}% toward CO2L-{wildcard_target} → "
+                        f"Interpolated factor {interpolated_factor:.3f} → {co2limit/1e6:.2f} MtCO₂"
+                    )
+                else:
+                    co2limit = wildcard_target * co2base
+                    logger.info(
+                        f"Year {year}: use_relative_targets is off. Using {100*wildcard_target:.1f}% × base → {co2limit/1e6:.2f} MtCO₂"
+                    )
+
             else:
                 co2limit = float(snakemake.params.electricity["co2limit"])
                 logger.info("Setting CO2 limit according to config value.")
@@ -429,9 +469,23 @@ if __name__ == "__main__":
 
     set_line_nom_max(
         n,
-        s_nom_max_set=snakemake.params.lines.get("s_nom_max,", np.inf),
-        p_nom_max_set=snakemake.params.links.get("p_nom_max,", np.inf),
+        s_nom_max_set=snakemake.params.lines.get("s_nom_max", np.inf),
+        p_nom_max_set=snakemake.params.links.get("p_nom_max", np.inf),
     )
+    '''
+    logger.info("\n" + "="*50)
+    logger.info("DEBUG OUTPUT: Links and p_nom_max values")
+    logger.info("="*50)
+
+    # Show the whole DataFrame in the logs
+    logger.info("\nFull links DataFrame:\n%s", n.links)
+
+    # Show the p_nom_max column as list for easy reading
+    logger.info("\np_nom_max column:\n%s", n.links.p_nom_max.tolist())
+
+    logger.info("\nNumber of links: %d", len(n.links))
+    logger.info("="*50 + "\n")
+'''
 
     if "ATK" in opts:
         enforce_autarky(n)

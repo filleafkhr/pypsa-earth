@@ -533,6 +533,182 @@ def base_network(
 
     _set_dc_underwater_fraction(n.lines, inputs.offshore_shapes)
     _set_dc_underwater_fraction(n.links, inputs.offshore_shapes)
+# ---- CLEANUP: cross-border normalization WITHOUT changing bus0/bus1 ----
+    if base_network_config.get("cleanup", False):
+
+        raw_whitelist = base_network_config.get("cleanup_whitelist") or []
+        whitelist_pairs = {tuple(sorted(p)) for p in raw_whitelist}
+
+        def compute_crossborder_scale_factors(
+            n,
+            cap_selector: str = "max",            # {"max","p95"}
+            s_max_pu_default: float = 1.0,
+            whitelist_pairs: set | None = None,   # set of tuples like {("DE","DK"), ("MY","ID")}
+        ):
+            """
+            Return dict with two pd.Series of per-asset scale factors (index = asset index):
+            {"lines": scale_series_for_lines, "links": scale_series_for_links}
+
+            Factors are computed so that, for each (carrier, country0, country1) corridor,
+            the SUM of capacities after scaling equals the selected corridor target capacity.
+            Whitelisted country pairs get factor = 1.0 (no change).
+            """
+
+            def _recompute_country_cols(n, tbl: str, canonize_for_clustering: bool = True):
+                df = getattr(n, tbl)
+                if df.empty:
+                    return df
+                b_country = n.buses["country"]
+                df = df.copy()
+                df["bus_country0"] = b_country.reindex(df["bus0"]).values
+                df["bus_country1"] = b_country.reindex(df["bus1"]).values
+                if canonize_for_clustering:
+                    c0 = df["bus_country0"].astype(str).values
+                    c1 = df["bus_country1"].astype(str).values
+                    df["country0"] = np.minimum(c0, c1)
+                    df["country1"] = np.maximum(c0, c1)
+                else:
+                    df["country0"] = df["bus_country0"]
+                    df["country1"] = df["bus_country1"]
+                return df
+
+            def _select_cap(arr: pd.Series, mode: str) -> float:
+                vals = pd.to_numeric(arr, errors="coerce").dropna().values
+                if vals.size == 0:
+                    return np.nan
+                return float(np.percentile(vals, 95)) if mode == "p95" else float(np.max(vals))
+
+            def _scale_series_for_table(table: str, cap_col: str) -> pd.Series:
+                df = getattr(n, table)
+                if df.empty:
+                    return pd.Series(dtype=float)
+
+                df = _recompute_country_cols(n, table, True)
+
+                if cap_col not in df.columns:
+                    logger.info(f"{table}: '{cap_col}' not found; returning neutral factors.")
+                    return pd.Series(1.0, index=df.index, dtype=float)
+
+                # numeric caps
+                caps = pd.to_numeric(df[cap_col], errors="coerce").fillna(0.0)
+                df = df.copy()
+                df[cap_col] = caps
+
+                # only cross-border
+                cross = df["country0"].notna() & df["country1"].notna() & (df["country0"] != df["country1"])
+                if not cross.any():
+                    logger.info(f"{table}: no cross-border assets; returning neutral factors.")
+                    return pd.Series(1.0, index=df.index, dtype=float)
+
+                work = df.loc[cross].copy()
+
+                # carrier fallback
+                if "carrier" not in work.columns:
+                    work["carrier"] = "AC" if table == "lines" else "DC"
+
+                # optional whitelist
+                if whitelist_pairs:
+                    work["skip"] = [(a, b) in whitelist_pairs for a, b in zip(work["country0"], work["country1"])]
+                else:
+                    work["skip"] = False
+
+                grp_cols = ["carrier", "country0", "country1"]
+
+                # selected corridor cap (max or p95) per corridor
+                work["corr_cap_sel"] = work.groupby(grp_cols)[cap_col].transform(lambda s: _select_cap(s, cap_selector))
+
+                # physics cap for AC lines (optional clamp)
+                if table == "lines":
+                    # ensure s_max_pu
+                    if "s_max_pu" not in work.columns:
+                        work["s_max_pu"] = s_max_pu_default
+                    # need v_nom & i_nom — if missing, physics cap stays NaN (ignored)
+                    if ("v_nom" in work.columns) and ("i_nom" in work.columns):
+                        m = work["v_nom"].notna() & work["i_nom"].notna()
+                        work.loc[m, "s_cap_seg"] = np.sqrt(3.0) * work.loc[m, "v_nom"] * work.loc[m, "i_nom"] * work.loc[m, "s_max_pu"]
+                        work["phys_cap_corr"] = work.groupby(grp_cols)["s_cap_seg"].transform("max")
+                        # apply physics clamp where available
+                        use_phys = work["phys_cap_corr"].notna()
+                        work.loc[use_phys, "corr_cap_sel"] = np.minimum(
+                            work.loc[use_phys, "corr_cap_sel"], work.loc[use_phys, "phys_cap_corr"]
+                        )
+
+                # corridor sum of current capacities (denominator)
+                work["sum_cap_corr"] = work.groupby(grp_cols)[cap_col].transform("sum").replace(0.0, np.nan)
+
+                # corridor factor: target / current
+                work["corr_factor"] = work["corr_cap_sel"] / work["sum_cap_corr"]
+
+                # rows to skip (whitelist) → factor 1.0
+                work.loc[work["skip"], "corr_factor"] = 1.0
+
+                # if denom was NaN (all zeros), keep neutral factor
+                work["corr_factor"] = work["corr_factor"].fillna(1.0)
+
+                # assemble full series (1.0 outside cross-border)
+                factors = pd.Series(1.0, index=df.index, dtype=float)
+                factors.loc[work.index] = work["corr_factor"].astype(float).values
+                return factors
+
+            factors_lines = _scale_series_for_table("lines", "s_nom")
+            factors_links = _scale_series_for_table("links", "p_nom")
+
+            return {"lines": factors_lines, "links": factors_links}
+
+
+        def apply_crossborder_scales(n, factors: dict):
+            """
+            Multiply capacities by the provided per-asset factors.
+            factors["lines"]: pd.Series indexed by n.lines.index (scales s_nom)
+            factors["links"]: pd.Series indexed by n.links.index (scales p_nom)
+            """
+            # lines
+            if not n.lines.empty and "lines" in factors and not factors["lines"].empty:
+                scale = factors["lines"].reindex(n.lines.index).fillna(1.0).astype(float)
+                before = pd.to_numeric(n.lines["s_nom"], errors="coerce").fillna(0.0).copy()
+                n.lines["s_nom"] = (before * scale).astype(float)
+
+            # links
+            if not n.links.empty and "links" in factors and not factors["links"].empty:
+                scale = factors["links"].reindex(n.links.index).fillna(1.0).astype(float)
+                before = pd.to_numeric(n.links["p_nom"], errors="coerce").fillna(0.0).copy()
+                n.links["p_nom"] = (before * scale).astype(float)
+
+        # 1) compute scale factors (does NOT modify the network)
+        factors = compute_crossborder_scale_factors(
+            n,
+            cap_selector="max",                    # or "p95"
+            s_max_pu_default=1.0,
+            whitelist_pairs=whitelist_pairs         # optional
+        )
+
+        # 2) apply (multiplicative) scaling to lines/links
+        apply_crossborder_scales(n, factors)
+
+    return n
+
+def drop_interconnectors(n):
+    """
+    Remove all lines and links that connect buses in different countries.
+    """
+    # Ensure bus countries are available
+    bus_country = n.buses["country"]
+
+    # For lines
+    if not n.lines.empty:
+        c0 = bus_country.reindex(n.lines["bus0"]).values
+        c1 = bus_country.reindex(n.lines["bus1"]).values
+        mask = (c0 == c1)
+        n.lines = n.lines[mask]
+
+    # For links
+    if not n.links.empty:
+        c0 = bus_country.reindex(n.links["bus0"]).values
+        c1 = bus_country.reindex(n.links["bus1"]).values
+        mask = (c0 == c1)
+        n.links = n.links[mask]
+    
+    print('cleaned interconnections')
 
     return n
 
@@ -571,4 +747,6 @@ if __name__ == "__main__":
 
     n.buses = pd.DataFrame(n.buses.drop(columns="geometry"))
     n.meta = snakemake.config
+    if base_network_config['clean_interconnectors'] == True:
+        n = drop_interconnectors(n)
     n.export_to_netcdf(snakemake.output[0])

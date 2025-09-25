@@ -2129,7 +2129,7 @@ def add_heat(n, costs):
                 bus1=h_nodes[name] + f" {name} water tanks",
                 efficiency=costs.at["water tank charger", "efficiency"],
                 carrier=name + " water tanks charger",
-                marginal_cost2=1e-6,
+                #marginal_cost2=1e-6,
                 p_nom_extendable=True,
             )
 
@@ -2140,7 +2140,7 @@ def add_heat(n, costs):
                 bus1=h_nodes[name] + f" {name} heat",
                 carrier=name + " water tanks discharger",
                 efficiency=costs.at["water tank discharger", "efficiency"],
-                marginal_cost2=1e-6,
+                #marginal_cost2=1e-6,
                 p_nom_extendable=True,
             )
 
@@ -2166,7 +2166,7 @@ def add_heat(n, costs):
                 e_nom_extendable=True,
                 carrier=name + " water tanks",
                 standing_loss=1 - np.exp(-1 / 24 / tes_time_constant_days),
-                capital_cost=capital_cost,
+                #capital_cost=capital_cost,
                 lifetime=costs.at[name_type + " water tank storage", "lifetime"],
             )
 
@@ -2952,6 +2952,97 @@ def remove_carrier_related_components(n, carriers_to_drop):
     )
     n.mremove("Link", links_to_remove)
 
+def add_load_shedding_and_curtailment(n, load_shedding_cost=1000,curtailment_cost=1000):
+    """
+    Add load shedding generators for all buses, allowing the model to shed load 
+    at a high penalty cost.
+    Also add curtailment generators for all carriers (to dump excess generation).
+    """
+
+    # --- load shedding: per bus ---
+    for bus in n.buses.index:
+        n.add("Generator",
+              name="load_shedding_" + bus,
+              bus=bus,
+              p_nom=1e9,                 # very large capacity
+              marginal_cost=load_shedding_cost,
+              carrier="load_shedding")
+
+    # --- curtailment: per carrier ---
+    for carrier in n.carriers.index:
+        if carrier not in ["load_shedding", "curtailment"]:
+            n.add("Generator",
+                  name="curtailment_" + carrier,
+                  bus=n.buses.index[0],  # attach somewhere valid (can also be per-bus/per-carrier)
+                  p_nom=1e9,
+                  marginal_cost=curtailment_cost,
+                  carrier="curtailment")
+
+    print("✅ Added load shedding and curtailment generators.")
+def add_shedding_and_curtailment_per_node(
+    n,
+    load_shedding_cost=10_000,   # very high penalty
+    curtailment_cost=200,        # moderate penalty
+    sink_bus_name="curtailment_sink"
+):
+    """
+    Per-node (i.e., per-bus) load shedding and curtailment:
+      - Load shedding: Generator on every non-CO2 bus (huge cost).
+      - Curtailment:  Link from every non-CO2 bus to a global sink (eff=0, small penalty).
+    Excludes any bus whose carrier contains 'co2' (handles 'co2' and 'co2 stored').
+    """
+
+    # 0) cleanup: kill any wrongly-modeled curtailment Generators
+    bad_curt_gens = n.generators.index[n.generators.carrier == "curtailment"]
+    if len(bad_curt_gens):
+        n.mremove("Generator", list(bad_curt_gens))
+
+    # 1) ensure a single sink bus exists
+    if sink_bus_name not in n.buses.index:
+        n.add("Bus", sink_bus_name, carrier="curtailment")
+
+    # 2) pick all non-CO2 buses (exclude any carrier that contains 'co2'), and exclude the sink itself
+    bus_is_co2 = n.buses.carrier.str.contains("co2", case=False, na=False)
+    candidate_buses = n.buses.index[~bus_is_co2 & (n.buses.index != sink_bus_name)]
+
+    # 3) per-node load shedding (Generators)
+    for bus in candidate_buses:
+        gname = f"load_shedding__{bus}"
+        if gname not in n.generators.index:
+            n.add(
+                "Generator",
+                name=gname,
+                bus=bus,
+                p_nom=1e9,  # effectively unbounded
+                marginal_cost=load_shedding_cost,
+                carrier="load_shedding",
+            )
+
+    # 4) per-node curtailment (Links to sink, efficiency=0)
+    for bus in candidate_buses:
+        lname = f"curtailment__{bus}"
+        if lname not in n.links.index:
+            n.add(
+                "Link",
+                name=lname,
+                bus0=bus,
+                bus1=sink_bus_name,
+                p_nom_extendable=True,
+                efficiency=0.0,                 # everything is dumped
+                marginal_cost=curtailment_cost, # penalize spilling
+                carrier="curtailment",
+                p_min_pu=0.0,
+                p_max_pu=1.0,
+            )
+
+    # 5) sanity checks (optional; comment out in production)
+    # assert (n.generators.carrier == "curtailment").sum() == 0
+    # assert not n.buses.loc[n.generators.bus].carrier.str.contains("co2", case=False).any()
+    # assert not n.buses.loc[n.links.bus0].carrier.str.contains("co2", case=False).any()
+
+    print(f"✅ load shedding on {len(candidate_buses)} buses (cost={load_shedding_cost}); "
+          f"curtailment links to '{sink_bus_name}' added with cost={curtailment_cost}.")
+
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -3206,6 +3297,7 @@ if __name__ == "__main__":
 
     if snakemake.config["custom_data"]["water_costs"]:
         add_custom_water_cost(n)
+    add_shedding_and_curtailment_per_node(n, load_shedding_cost=10000000, curtailment_cost=10000000)
 
     n.export_to_netcdf(snakemake.output[0])
 

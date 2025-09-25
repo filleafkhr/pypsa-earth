@@ -184,6 +184,7 @@ def build_demand_profiles(
     admin_shapes,
     countries,
     scale,
+    substitute_country_load,
     start_date,
     end_date,
     out_path,
@@ -204,6 +205,8 @@ def build_demand_profiles(
         List of countries that is config input
     scale : float
         The scale factor is multiplied with the load (1.3 = 30% more load)
+    substitute_country_load:  list
+        List of countries whose load must be substituted to that of another country's
     start_date: parameter
         The start_date is the first hour of the first day of the snapshots
     end_date: parameter
@@ -230,6 +233,20 @@ def build_demand_profiles(
     logger.info(f"Merging demand data from paths {load_paths} into the load data frame")
     gegis_load = xr.merge(gegis_load_list)
     gegis_load = gegis_load.to_dataframe().reset_index().set_index("time")
+    # If Gegis data is unavailable for a specific country, it is advisable to use Gegis data from another region as an alternative. Later, it can be scaled
+    if substitute_country_load:
+        for country_a, country_b in substitute_country_load.items():
+            logger.info(f"Substitute load data of {country_a} using {country_b}.")
+
+            if country_a in gegis_load.region_code.unique():
+                logger.info(f"Dropping original load data of {country_a}.")
+                gegis_load = gegis_load.query("region_code != @country_a")
+
+            gegis_load_new = gegis_load.loc[gegis_load.region_code == country_b]
+            gegis_load_new.loc[:, "region_code"] = country_a
+            gegis_load_new.loc[:, "region_name"] = country_a
+
+            gegis_load = pd.concat([gegis_load, gegis_load_new])
 
     # filter load for analysed countries
     gegis_load = gegis_load.loc[gegis_load.region_code.isin(countries)]
@@ -311,7 +328,30 @@ if __name__ == "__main__":
     load_paths = snakemake.input["load"]
     countries = snakemake.params.countries
     admin_shapes = snakemake.input.gadm_shapes
-    scale = snakemake.params.load_options.get("scale", 1.0)
+
+    #myopic scaling ---
+    if "year" in snakemake.wildcards:
+        current_year = int(snakemake.wildcards.year)
+    else:
+        # fallback: try to parse from output filename
+        try:
+            current_year = int(''.join(filter(str.isdigit, snakemake.output[0])))
+        except:
+            current_year = None
+
+    raw_scale = snakemake.params.load_options.get("scale", {}).get("electricity", 1.0)
+
+    # If multi-year dict: pick the dict for the current year
+    if isinstance(raw_scale, dict) and current_year in raw_scale:
+        scale = raw_scale[current_year]
+        logger.info(f"Using year-specific scale for {current_year}")
+    else:
+        scale = raw_scale
+        logger.info(f"Using default/global scale {scale}")
+    
+    substitute_country_load = snakemake.params.load_options.get(
+        "substitute_country_load", False
+    )
     start_date = snakemake.params.snapshots["start"]
     end_date = snakemake.params.snapshots["end"]
     out_path = snakemake.output[0]
@@ -323,7 +363,9 @@ if __name__ == "__main__":
         admin_shapes,
         countries,
         scale,
+        substitute_country_load,
         start_date,
         end_date,
         out_path,
     )
+

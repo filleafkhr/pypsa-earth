@@ -17,7 +17,7 @@ enable:
 
 scenario:
   ll: ["copt"] 
-  clusters: [100]
+  clusters: [45]
   planning_horizons: 
   - 2030
   # - 2035
@@ -26,13 +26,13 @@ scenario:
   #- 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-1h] #Co2L-EQ0.8c- CO2 limit, 3H, 80% self sufficiency
+  opts: [144h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "1h"
+  - "144h"
 
 snapshots:
   start: "2018-01-01"
-  end: "2018-02-01"
+  end: "2019-01-01"
 
 cluster_options:
   simplify_network:
@@ -126,20 +126,32 @@ load_options: #fillea todo
         TH: 0.825
         VN: 1.507
     industry:
-      2030: 1
-      2035: 1
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
     heat:
-      2030: 0.00000000000001
-      2035: 0.00000000000001
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
     transport:
-      2030: 1
-      2035: 1
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
     aviation:
-      2030: 1
-      2035: 1
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
     shipping:
-      2030: 1
-      2035: 1
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
+    services:
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
+    agriculture:
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
+    residential:
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
+    rail:
+      2030: 0.00000000000000000000000000000000000000000000000000000000001
+      2035: 0.00000000000000000000000000000000000000000000000000000000001
   substitute_country_load:
     LA: MM
 
@@ -147,7 +159,7 @@ load_options: #fillea todo
 
 electricity:
 #Fillea todo
-  co2base: 1e+11 #1e+9 #AEO6
+  co2limit: 1e+50 #1e+9 #AEO6
   use_relative_targets: false
   co2_relative_targets:
     2030: 0.20  
@@ -231,14 +243,14 @@ sector:
     ASEAN_2050: 0.0009 #0.09% in transport share 
   co2_network: false 
   biomass_transport: false
-  solid_biomass_potential: 10.89 # TWh/a, 10% from biomass residues 
+  solid_biomass_potential: 1089 # TWh/a, 10% from biomass residues 
   biogas_potential: 0.4356 # TWh/a, 10% only from lifestock manure (4% of total residue)
   co2_sequestration_potential: 120 #MtCO2/a sequestration potential in 2050 
   co2_sequestration_cost: 37.66 #EUR/tCO2 for sequestration of CO2, ASEAN max=450$/Ton
   shipping_hydrogen_liquefaction: false
   space_heat_share: 0
   #Fillea todo
-  tes: false
+  tes: true
   solar_cf_correction: 0.788457 # = >>>1/1.2683
   h2_cavern: false
   methanation: false
@@ -281,3 +293,4 @@ transmission_projects:
   - under_consideration
   - existing
   new_link_capacity: keep #keep or zero
+

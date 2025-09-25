@@ -29,6 +29,7 @@ enable:
   # requires cds API key https://cds.climate.copernicus.eu/api-how-to
   # More information https://atlite.readthedocs.io/en/latest/introduction.html#datasets
   progress_bar: true # show progress bar during downloading routines and other long-running tasks
+  renewable_profiles: true # If True, renewable profiles will be generated
 
 
 
@@ -147,22 +148,86 @@ build_osm_network: # Options of the build_osm_network script; osm = OpenStreetMa
 base_network:
   min_voltage_substation_offshore: 51000 # [V] minimum voltage of the offshore substations
   min_voltage_rebase_voltage: 51000 # [V] minimum voltage in base network
+  cleanup: True # name of the base network, used in the build_cutout.py script  
+  cleanup_whitelist:
+    #- ["MY", "TH"]
+  name: osm-prebuilt
+  clean_interconnectors: True 
+
 
 load_options:
   ssp: "ssp2-2.6" # shared socio-economic pathway (GDP and population growth) scenario to consider
   weather_year: 2018 # Load scenarios available with different weather year (different renewable potentials)
   prediction_year: 2030 # Load scenarios available with different prediction year (GDP, population)
-  scale: 1 # scales all load time-series, i.e. 2 = doubles load
+  scale: 
+    electricity: 
+      2030:
+        BN: 0.943
+        ID: 1.116
+        KH: 1.538
+        LA: 0.56
+        MM: 0.652
+        MY: 0.956
+        PH: 1.014
+        SG: 0.81
+        TH: 0.805
+        VN: 1.413
+      2035:
+        BN: 0.819
+        ID: 1.129
+        KH: 1.568
+        LA: 0.58
+        MM: 0.692
+        MY: 0.965
+        PH: 1.027
+        SG: 0.784
+        TH: 0.82
+        VN: 1.462
+    industry:
+      2030: 1
+      2035: 1
+    heat:
+      2030: 1
+      2035: 1
+    land transport:
+      2030: 1
+      2035: 1
+    aviation:
+      2030: 1
+      2035: 1
+    shipping:
+      2030: 1
+      2035: 1
+    services:
+      2030: 1
+      2035: 1
+    agriculture:
+      2030: 1
+      2035: 1
+    residential:
+      2030: 1
+      2035: 1
+    rail:
+      2030: 1
+      2035: 1
 
 electricity:
   base_voltage: 380.
   voltages: [132., 220., 300., 380., 500., 750.]
   co2limit: 7.75e+7 # European default, 0.05 * 3.1e9*0.5, needs to be adjusted for Africa
   co2base: 1.487e+9 # European default, adjustment to Africa necessary
+  use_relative_targets: false
+  co2_relative_targets:
+    2030: 0.10  
+    2040: 0.70 
+    2050: 1.0  
+  co2_relative_targets: 
   agg_p_nom_limits: data/agg_p_nom_minmax.csv
   hvdc_as_lines: false # should HVDC lines be modeled as `Line` or as `Link` component?
   automatic_emission: false
   automatic_emission_base_year: 1990 # 1990 is taken as default. Any year from 1970 to 2018 can be selected.
+  base_network: osm-plus-prebuilt
+  base_network_version: 0.1
 
   operational_reserve: # like https://genxproject.github.io/GenX/dev/core/#Reserves
     activate: false
@@ -367,6 +432,9 @@ costs:
   year: 2030
   version: v0.10.0
   discountrate: [0.071] #, 0.086, 0.111]
+  append_cost_data: true
+  regional_factor: true
+  country_specific_data: "" # (optional) Reference to the desired technology-data directory for techno-economic input data; Only "" and "US" supported, for other values check the technology-data output directory
   # [EUR/USD] ECB: https://www.ecb.europa.eu/stats/exchange/eurofxref/html/eurofxref-graph-usd.en.html # noqa: E501
   USD2013_to_EUR2013: 0.7532 # [EUR/USD] ECB: https://www.ecb.europa.eu/stats/exchange/eurofxref/html/eurofxref-graph-usd.en.html
   rooftop_share: 0.14 # based on the potentials, assuming  (0.1 kW/m2 and 10 m2/person)
@@ -405,6 +473,7 @@ costs:
   #   CCGT: 0.58
   lines:
     length_factor: 1.25 #to estimate offwind connection costs
+
 
 
 monte_carlo:
@@ -653,6 +722,10 @@ sector:
     AP_2050: 0.06
     NZ_2050: 0.28
     DF_2050: 0.08
+    NZ_2035: 0.1
+    NZ_2040: 0.15
+    NZ_2045: 0.2
+  
 
   land_transport_electric_share: # 1 means all EVs  # This leads to problems when non-zero HERE
     BU_2030: 0.00
@@ -664,6 +737,9 @@ sector:
     AP_2050: 0.42
     NZ_2050: 0.68
     DF_2050: 0.011
+    NZ_2035: 0.25
+    NZ_2040: 0.35
+    NZ_2045: 0.45
 
   co2_network: true
   co2_sequestration_potential: 200 #MtCO2/a sequestration potential for Europe
@@ -702,6 +778,7 @@ sector:
     coal: coal
     lignite: lignite
     biomass: biomass
+    CCGT: gas
   keep_existing_capacities: true
 
 solving:
@@ -989,6 +1066,13 @@ plotting:
     high-temp electrolysis: "magenta"
     today: "#D2691E"
     Ambient: "k"
+    B2B: "#808080"  # neutral grey
+    H2 Electrolysis: "#1f77b4"  # blue-ish
+    H2 Fuel Cell: "#2ca02c"  # green
+    urban central gas CHP: "#ff7f0e"  # orange
+    urban central gas CHP CC: "#d62728"  # red
+    urban central solid biomass CHP: "#8c564b"  # brown
+    urban central solid biomass CHP CC: "#9467bd"  # purple
 
 
   nice_names:
