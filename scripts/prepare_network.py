@@ -403,21 +403,30 @@ if __name__ == "__main__":
 
                 if use_relative:
                     progress = float(relative_targets.get(year, 1.0))  # default = full progress
-                    interpolated_factor = (1 - progress) * 1.0 + progress * wildcard_target
+                    interpolated_factor =  progress 
                     co2limit = interpolated_factor * co2base
-                    logger.info(
-                        f"Year {year}: Progress {100*progress:.0f}% toward CO2L-{wildcard_target} → "
-                        f"Interpolated factor {interpolated_factor:.3f} → {co2limit/1e6:.2f} MtCO₂"
-                    )
+                
                 else:
-                    co2limit = wildcard_target * co2base
-                    logger.info(
-                        f"Year {year}: use_relative_targets is off. Using {100*wildcard_target:.1f}% × base → {co2limit/1e6:.2f} MtCO₂"
-                    )
+                    co2limit =  co2base
 
             else:
-                co2limit = float(snakemake.params.electricity["co2limit"])
-                logger.info("Setting CO2 limit according to config value.")
+                try:
+                    year = int(snakemake.wildcards.planning_horizons)
+                    print(year)
+                except AttributeError:
+                    year = snakemake.params.get("prediction_year", 2050)
+                co2base = float(snakemake.params.electricity["co2limit"])
+                use_relative = snakemake.params.electricity.get("use_relative_targets", False)
+                relative_targets = snakemake.params.electricity.get("co2_relative_targets", {})
+
+                if use_relative:
+                    progress = float(relative_targets.get(year, 1.0))  # default = full progress
+                    interpolated_factor =  progress 
+                    co2limit = interpolated_factor * co2base
+                    
+                else:
+                    co2limit =  co2base
+                   
             add_co2limit(n, co2limit, Nyears)
             break
 

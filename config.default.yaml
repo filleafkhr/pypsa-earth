@@ -226,14 +226,22 @@ electricity:
   max_hours:
     battery: 6
     H2: 168
+  coal_phaseout:
+    enable: true          
+    start_year: 2030
+    end_year: 2050
+    target_year: 
+      2040: 0.5
+      2050: 0
+    min_age: 10
 
   extendable_carriers:
-    Generator: [solar, onwind, offwind-ac, offwind-dc, OCGT]
+    Generator: [solar, onwind, offwind-ac, offwind-dc, OCGT, CCGT]
     StorageUnit: [] # battery, H2
     Store: [battery, H2]
     Link: [] # H2 pipeline
 
-  powerplants_filter: (DateOut >= 2022 or DateOut != DateOut)
+  powerplants_filter: (DateOut >= 2025 or DateOut != DateOut) #and Fueltype not in ['Hard Coal','Lignite'] #(DateOut >= 2022 or DateOut != DateOut)
   custom_powerplants: false #  "false" use only powerplantmatching (ppm) data, "merge" combines ppm and custom powerplants, "replace" use only custom powerplants
 
   conventional_carriers: [nuclear, oil, OCGT, CCGT, coal, lignite, geothermal, biomass]
@@ -840,7 +848,7 @@ solving:
     cbc-default: {} # Used in CI
     glpk-default: {} # Used in CI
 
-  mem: 30000 #memory in MB; 20 GB enough for 50+B+I+H2; 100 GB for 181+B+I+H2
+  mem: 100000 #memory in MB; 20 GB enough for 50+B+I+H2; 100 GB for 181+B+I+H2
 
 
 plotting:
@@ -1091,3 +1099,41 @@ transmission_projects:
     #- planned_not_yet_permitted
     #- under_consideration
   new_link_capacity: zero #keep or zero
+
+feature_switches:
+  gas_trade_adjustments: false      # ON/OFF button
+  storage_country_rules: false      # ON/OFF button
+
+gas_trade:
+  importers: ["ID","PH","VN"]
+  exporters: ["MY","BN"]
+  # how to adjust when importer/exporter
+  importer_adjustment:
+    fuel_marginal_cost_add: 3.0     # €/MWh_fuel added to gas fuel generators
+    ccgt_vom_add: 0.3               # €/MWh_e added to CCGT link marginal_cost (optional)
+    ocgt_vom_add: 0.3
+    ccgt_capex_mult: 1.05           # +5% capex (optional)
+    ocgt_capex_mult: 1.05
+  exporter_adjustment:
+    fuel_marginal_cost_add: -2.0
+    ccgt_vom_add: -0.2
+    ocgt_vom_add: -0.2
+    ccgt_capex_mult: 0.97
+    ocgt_capex_mult: 0.97
+
+storage_rules:
+  # country-specific storage toggles or cost tweaks
+  - country: "ID"
+    enable: true
+    carriers: ["battery","battery charger","battery discharger"]
+    fields: { }                     # absolute overrides (e.g., capital_cost: 11000)
+    mult:   { "capital_cost": 0.95 }# 5% cheaper in ID
+
+  - country: "PH"
+    enable: false                   # disable storage stack in PH
+    carriers: ["battery","battery charger","battery discharger"]
+
+  - country: "*"                    # wildcard country
+    enable: true
+    carriers: ["home battery"]
+    fields: { }                     # no change; just ensure enabled

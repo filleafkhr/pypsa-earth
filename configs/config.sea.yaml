@@ -13,22 +13,22 @@ enable:
   download_osm_data: false 
   build_natura_raster: false 
   build_cutout: false
-  renewable_profiles: false 
+  renewable_profiles: true 
 
 scenario:
   ll: ["copt"] 
-  clusters: [45]
+  clusters: [60]
   planning_horizons: 
   - 2030
-  # - 2035
+  #- 2035
   #- 2040
   #- 2045  
-  #- 2050  
+  - 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-144h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
+  opts: [Co2L-6h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "144h"
+  - "6h"
 
 snapshots:
   start: "2018-01-01"
@@ -127,17 +127,29 @@ load_options: #fillea todo
         VN: 1.507
 #should be in MWh, if not used = 0
     industry:
-      2030: 3131959000 #AEO8 BAS
-      2035: 3832085000
+      2030: 0 #AEO8 BAS
+      2035: 0
+      2040: 0
+      2045: 0
+      2050: 0
     transport: #AEO8 BAS
       2030: 2344608000
       2035: 2795852000 
+      2040: 3266424000
+      2045: 3793143000
+      2050: 4357987000
     services: #AEO8 BAS
       2030: 458222000
       2035: 544284000
+      2040: 641976000
+      2045: 756050000
+      2050: 882617000
     agriculture: #All scenarios
       2030: 148864000
       2035: 184917000
+      2040: 225522000
+      2045: 273305000
+      2050: 323614000
     residential: #AEO8 BAS
       2030: 744320000
       2035: 751298000
@@ -148,16 +160,16 @@ load_options: #fillea todo
 
 electricity:
 #Fillea todo
-  co2limit: 1e+9 #1e+9 #AEO6
-  use_relative_targets: false
+  co2limit: 1e+9 #1e+9 20% #AEO6
+  use_relative_targets: true
   co2_relative_targets:
-    2030: 0.20  
-    2035: 0.40
-    2040: 0.60
-    2045: 0.80 
-    2050: 1.0
+    2030: 2.5 #1.8504  # 2,215.2 Mt CO2-eq in 2022
+    2035: 1.5
+    2040: 1
+    2045: 0.5
+    2050: 0
   #automatic_emission: true  # COULDD BE WHY INFEASIBLE
-  powerplants_filter: (DateOut >= 2050 or DateOut != DateOut)
+  #powerplants_filter: (DateOut >= 2030) or DateOut != DateOut)
   operational_reserve: 
     activate: false 
     epsilon_load: 0.025 
@@ -179,9 +191,9 @@ costs:
   discountrate: [0.05] 
   #Fillea todo : No data available for SEA 
   marginal_cost: # EUR/MWh
-    solar: 0.
-    onwind: 0.
-    offwind: 0.
+    solar: 10.
+    onwind: 1.
+    offwind: 1.
     hydro: 0.  #4.68 USD/MWh
     H2: 0. 
     electrolysis: 0.
@@ -190,9 +202,15 @@ costs:
     battery inverter: 0.
   emission_prices: # in currency per tonne emission, only used with the option Ep
     co2: 0.
+  override:
+    marginal_cost:
+      solar: 10
+      onwind: 1
+      offwind: 1
   
 fossil_reserves:
   oil: 19212.76 #TWh 11.8 billion bbo
+  coal: 100 #fillea todo
 export:
   endogenous: false # COULDD BE WHY INFEASIBLE
   h2export: [0] #demand in twh
@@ -213,27 +231,33 @@ sector:
     underground_storage: true  
   #AMS target scenario
   land_transport_fuel_cell_share:
-    ASEAN_2030: 0.00 
-    ASEAN_2035: 0.000225
-    ASEAN_2040: 0.000450
-    ASEAN_2045: 0.000675
-    ASEAN_2050: 0.0009 #0.09% in transport share 
+    ASEAN_2030: 0.4 
+    ASEAN_2035: 0.8
+    ASEAN_2040: 0.12
+    ASEAN_2045: 0.16
+    ASEAN_2050: 0.20 #0.09% in transport share 
   land_transport_electric_share:
-    ASEAN_2030: 0.014 
-    ASEAN_2035: 0.029
-    ASEAN_2040: 0.044
-    ASEAN_2045: 0.059
-    ASEAN_2050: 0.074
+    ASEAN_2030: 0.12 
+    ASEAN_2035: 0.24
+    ASEAN_2040: 0.36
+    ASEAN_2045: 0.48
+    ASEAN_2050: 0.60
   shipping_hydrogen_share:
-    ASEAN_2030: 0.00 
-    ASEAN_2035: 0.000225
-    ASEAN_2040: 0.000450
-    ASEAN_2045: 0.000675
-    ASEAN_2050: 0.0009 #0.09% in transport share 
+    ASEAN_2030: 0.4 
+    ASEAN_2035: 0.8
+    ASEAN_2040: 0.12
+    ASEAN_2045: 0.16
+    ASEAN_2050: 0.20 #0.09% in transport share 
   co2_network: false 
   biomass_transport: false
-  solid_biomass_potential: 1089 # TWh/a, 10% from biomass residues 
-  biogas_potential: 0.4356 # TWh/a, 10% only from lifestock manure (4% of total residue)
+  solid_biomass_potential: 1089 # TWh/a, biomass residues 
+  biogas_potential: 43.56 # TWh/a, only from lifestock manure (4% of total residue)
+  bio_pathway:
+    2030: 0.30 
+    2035: 0.60
+    2040: 0.80
+    2045: 0.95
+    2050: 1.00     
   co2_sequestration_potential: 120 #MtCO2/a sequestration potential in 2050 
   co2_sequestration_cost: 37.66 #EUR/tCO2 for sequestration of CO2, ASEAN max=450$/Ton
   shipping_hydrogen_liquefaction: false
@@ -249,8 +273,6 @@ sector:
   SMR CC: false
   lignite:
     spatial_lignite: true
-
-  
 
 
 focus_weights: # Focus weights based on land area
@@ -276,7 +298,8 @@ clean_osm_data_options:
 transmission_projects:
   enable: true
   include:
-    EO8 - Fin: true
+    #EO8 - Fin: true
+    EO8: true
   status:
   - in_planning
   - under_consideration

@@ -260,6 +260,116 @@ if __name__ == "__main__":
             * industry_util_factor
         )
 
+        # normalize to clean Series
+        AL_series = pd.Series(AL_emissions, name="AL_emissions").dropna().astype(float)
+        Steel_series = pd.Series(Steel_emissions, name="Steel_emissions").dropna().astype(float)
+        NMM_series = pd.Series(NMM_emissions, name="NMM_emissions").dropna().astype(float)
+        Refinery_series = pd.Series(refinery_emissons, name="Refinery_emissions").dropna().astype(float)
+
+        # ---------- AL ----------
+        print("\n=== AL_emissions (non-ferrous) ===")
+        print(f"entries: {AL_series.size} | countries: {AL_series.index.nunique()}")
+        _tot = AL_series.sum()
+        print(f"TOTAL: {_tot:,.0f} tCO2/a  ({_tot/1e6:.3f} MtCO2/a)")
+        print(f"MIN/MAX: {AL_series.min():,.0f} / {AL_series.max():,.0f} tCO2/a")
+        print(f"P50/P90/P99: {AL_series.quantile(0.5):,.0f} / {AL_series.quantile(0.9):,.0f} / {AL_series.quantile(0.99):,.0f} tCO2/a")
+        _top = AL_series.sort_values(ascending=False).head(min(10, AL_series.size))
+        print("\nTop countries:")
+        print(pd.DataFrame({"tCO2/a": _top, "MtCO2/a": _top/1e6}).to_string(float_format=lambda x: f"{x:,.3f}"))
+        if (AL_series > 200e6).any():
+            _warn = (AL_series[AL_series > 200e6] / 1e6).sort_values(ascending=False)
+            print("\n[warn] AL_emissions > 200 MtCO2/a:")
+            print(_warn.to_string(float_format=lambda x: f"{x:,.3f}"))
+
+        # ---------- Steel ----------
+        print("\n=== Steel_emissions ===")
+        print(f"entries: {Steel_series.size} | countries: {Steel_series.index.nunique()}")
+        _tot = Steel_series.sum()
+        print(f"TOTAL: {_tot:,.0f} tCO2/a  ({_tot/1e6:.3f} MtCO2/a)")
+        print(f"MIN/MAX: {Steel_series.min():,.0f} / {Steel_series.max():,.0f} tCO2/a")
+        print(f"P50/P90/P99: {Steel_series.quantile(0.5):,.0f} / {Steel_series.quantile(0.9):,.0f} / {Steel_series.quantile(0.99):,.0f} tCO2/a")
+        _top = Steel_series.sort_values(ascending=False).head(min(10, Steel_series.size))
+        print("\nTop countries:")
+        print(pd.DataFrame({"tCO2/a": _top, "MtCO2/a": _top/1e6}).to_string(float_format=lambda x: f"{x:,.3f}"))
+        if (Steel_series > 200e6).any():
+            _warn = (Steel_series[Steel_series > 200e6] / 1e6).sort_values(ascending=False)
+            print("\n[warn] Steel_emissions > 200 MtCO2/a:")
+            print(_warn.to_string(float_format=lambda x: f"{x:,.3f}"))
+
+        # ---------- NMM ----------
+        print("\n=== NMM_emissions (non-metallic minerals) ===")
+        print(f"entries: {NMM_series.size} | countries: {NMM_series.index.nunique()}")
+        _tot = NMM_series.sum()
+        print(f"TOTAL: {_tot:,.0f} tCO2/a  ({_tot/1e6:.3f} MtCO2/a)")
+        print(f"MIN/MAX: {NMM_series.min():,.0f} / {NMM_series.max():,.0f} tCO2/a")
+        print(f"P50/P90/P99: {NMM_series.quantile(0.5):,.0f} / {NMM_series.quantile(0.9):,.0f} / {NMM_series.quantile(0.99):,.0f} tCO2/a")
+        _top = NMM_series.sort_values(ascending=False).head(min(10, NMM_series.size))
+        print("\nTop countries:")
+        print(pd.DataFrame({"tCO2/a": _top, "MtCO2/a": _top/1e6}).to_string(float_format=lambda x: f"{x:,.3f}"))
+        if (NMM_series > 200e6).any():
+            _warn = (NMM_series[NMM_series > 200e6] / 1e6).sort_values(ascending=False)
+            print("\n[warn] NMM_emissions > 200 MtCO2/a:")
+            print(_warn.to_string(float_format=lambda x: f"{x:,.3f}"))
+
+        # ---------- Refinery ----------
+        print("\n=== Refinery_emissions (chem & petrochem) ===")
+        print(f"entries: {Refinery_series.size} | countries: {Refinery_series.index.nunique()}")
+        _tot = Refinery_series.sum()
+        print(f"TOTAL: {_tot:,.0f} tCO2/a  ({_tot/1e6:.3f} MtCO2/a)")
+        print(f"MIN/MAX: {Refinery_series.min():,.0f} / {Refinery_series.max():,.0f} tCO2/a")
+        print(f"P50/P90/P99: {Refinery_series.quantile(0.5):,.0f} / {Refinery_series.quantile(0.9):,.0f} / {Refinery_series.quantile(0.99):,.0f} tCO2/a")
+        _top = Refinery_series.sort_values(ascending=False).head(min(10, Refinery_series.size))
+        print("\nTop countries:")
+        print(pd.DataFrame({"tCO2/a": _top, "MtCO2/a": _top/1e6}).to_string(float_format=lambda x: f"{x:,.3f}"))
+        if (Refinery_series > 200e6).any():
+            _warn = (Refinery_series[Refinery_series > 200e6] / 1e6).sort_values(ascending=False)
+            print("\n[warn] Refinery_emissions > 200 MtCO2/a:")
+            print(_warn.to_string(float_format=lambda x: f"{x:,.3f}"))
+
+        # ---------- index alignment (who appears where) ----------
+        AL_idx = set(AL_series.index)
+        Steel_idx = set(Steel_series.index)
+        NMM_idx = set(NMM_series.index)
+        Ref_idx = set(Refinery_series.index)
+        _common = AL_idx & Steel_idx & NMM_idx & Ref_idx
+        print("\n=== index alignment check ===")
+        print(f"common countries: {len(_common)}")
+        _only_AL = sorted(AL_idx - _common)
+        _only_Steel = sorted(Steel_idx - _common)
+        _only_NMM = sorted(NMM_idx - _common)
+        _only_Ref = sorted(Ref_idx - _common)
+        if _only_AL:   print(f"only in AL: {_only_AL[:10]}{' …' if len(_only_AL) > 10 else ''}")
+        if _only_Steel: print(f"only in Steel: {_only_Steel[:10]}{' …' if len(_only_Steel) > 10 else ''}")
+        if _only_NMM:   print(f"only in NMM: {_only_NMM[:10]}{' …' if len(_only_NMM) > 10 else ''}")
+        if _only_Ref:   print(f"only in Refinery: {_only_Ref[:10]}{' …' if len(_only_Ref) > 10 else ''}")
+
+        # ---------- echo factors you used ----------
+        try:
+            print("\n=== emission factors (as used) ===")
+            print("non-ferrous metals:", emission_factors["non-ferrous metals"])
+            print("iron and steel:", emission_factors["iron and steel"])
+            print("non-metallic minerals:", emission_factors["non-metallic minerals"])
+            print("chemical and petrochemical:", emission_factors["chemical and petrochemical"])
+            print("industry_util_factor:", industry_util_factor)
+        except Exception as e:
+            print("could not print factors:", e)
+            
+    # === PROCESS EMISSIONS TRACE (single cell; no helper funcs) ===
+
+        # component series (tCO2/a)
+        AL_series     = pd.Series(AL_emissions,        name="AL").dropna().astype(float)
+        Steel_series  = pd.Series(Steel_emissions,     name="Steel").dropna().astype(float)
+        NMM_series    = pd.Series(NMM_emissions,       name="NMM").dropna().astype(float)
+        Ref_series    = pd.Series(refinery_emissons,   name="Refinery").dropna().astype(float)  # keep your spelling
+
+        print("\n=== process emissions — raw components (tCO2/a) ===")
+        print(f"AL total: {AL_series.sum():,.0f}")
+        print(f"Steel total: {Steel_series.sum():,.0f}")
+        print(f"NMM total: {NMM_series.sum():,.0f}")
+        print(f"Refinery total: {Ref_series.sum():,.0f}")
+        raw_total = AL_series.sum() + Steel_series.sum() + NMM_series.sum() + Ref_series.sum()
+        print(f"RAW TOTAL: {raw_total:,.0f} tCO2/a  ({raw_total/1e6:.3f} MtCO2/a)")
+
         for country in countries:
             industry_base_totals.loc[(country, "process emissions"), :] = 0
             try:
@@ -334,6 +444,9 @@ if __name__ == "__main__":
     nodal_df.rename(columns=rename_sectors, inplace=True)
 
     nodal_df.index.name = "MWh/a (tCO2/a)"
+
+        # scan nodal_df* DataFrames for the distributed totals
+    print(nodal_df.sum())
 
     nodal_df.to_csv(
         snakemake.output.industrial_energy_demand_per_node, float_format="%.2f"

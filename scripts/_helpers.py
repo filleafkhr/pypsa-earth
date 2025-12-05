@@ -1557,3 +1557,17 @@ def set_length_based_efficiency(n, carrier, bus_suffix, transmission_efficiency)
         """
         # set the required compression demand
         n.links.loc[carrier_i, "efficiency2"] = -compression_per_1000km * lengths / 1e3
+
+
+def get_yearly_currency_exchange_rate(from_currency: str, to_currency: str, year: int) -> float:
+    """
+    Dummy or real implementation for currency conversion.
+    For now: return a fixed 2020 USD→EUR conversion rate (~0.85).
+    """
+    if from_currency == "USD" and to_currency == "EUR":
+        # Hardcode, or later replace with dynamic API/CSV lookup
+        return 0.85
+    elif from_currency == "EUR" and to_currency == "USD":
+        return 1.0 / 0.85
+    else:
+        raise ValueError(f"No exchange rate defined for {from_currency}→{to_currency}, year {year}")

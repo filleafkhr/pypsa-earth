@@ -709,6 +709,13 @@ def add_biomass(n, costs):
     # 1. Load annual potentials from config (TWh -> MWh)
     biomass_pot = snakemake.config["sector"]["solid_biomass_potential"] * 1e6
     biogas_pot  = snakemake.config["sector"]["biogas_potential"] * 1e6
+    sched = snakemake.config["sector"].get("bio_pathway", {})  # {year: frac}
+    # try both str and int keys; default = 1.0 (or set to 0.0 if you prefer)
+    frac = sched.get(investment_year, sched.get(str(investment_year), 1.0))
+    frac = max(0.0, min(1.0, float(frac)))
+    biomass_pot *= frac
+    biogas_pot  *= frac
+
 
     # 2. Distribute equally across nodes
     biomass_pot_spatial = biomass_pot / len(spatial.biomass.nodes)
@@ -920,6 +927,28 @@ def add_biomass(n, costs):
             mask_chp_cc = n.links.carrier.str.contains("urban central solid biomass CHP CC")
             n.links.loc[mask_chp_cc, "p_nom_max"] = p_nom_max_biomass_chp_cc
 
+def co2_cap_from_config(cfg, year):
+    el = cfg["electricity"]
+    base = float(el.get("co2limit", 0.0))  # cast even if "1e+9" was a string
+
+    use_rel = el.get("use_relative_targets", False)
+    if isinstance(use_rel, str):
+        use_rel = use_rel.strip().lower() in ("1", "true", "yes", "y")
+    if not use_rel:
+        return base
+
+    # keys/values may be strings in YAML → cast both
+    rel = {int(k): float(v) for k, v in el.get("co2_relative_targets", {}).items()}
+    if not rel:
+        return base
+
+    y = int(year)
+    years = sorted(rel)
+    # step behavior: use the last target <= year (fallback to smallest key)
+    k = max([yy for yy in years if yy <= y], default=years[0])
+    frac = rel[k]
+    print(f"CO2 cap for {y}: {base * frac}")
+    return base * frac
 
 
 def add_co2(n, costs):
@@ -1027,6 +1056,37 @@ def add_co2(n, costs):
         * co2_links.length
     )
     capital_cost = cost_onshore + cost_submarine
+    # --- after you added the CO2 buses/stores/loads ---
+    cap = co2_cap_from_config(snakemake.config, investment_year)
+
+    # the atmosphere store should be a *tally* (never negative, fixed capacity)
+    n.stores.loc["co2 atmosphere", "e_min_pu"] = 0.0           # no negative CO2 in air
+    n.stores.loc["co2 atmosphere", "e_initial"] = 0.0
+    n.stores.loc["co2 atmosphere", "e_nom_extendable"] = False  # fix capacity instead of extend
+    n.stores.loc["co2 atmosphere", "e_nom"] = cap               # hard cap
+    n.stores.loc["co2 atmosphere", "e_nom_max"] = cap           # belt & suspenders
+    
+    Nyears = float(n.snapshot_weightings.objective.sum()) / 8760.0
+    gc_const = float(cap) * Nyears
+
+    if not n.global_constraints.empty:
+        mask = n.global_constraints.carrier_attribute.fillna("").str.contains("co2", case=False, na=False)
+    else:
+        mask = None
+
+    if mask is not None and mask.any():
+        idx = n.global_constraints.index[mask]
+        n.global_constraints.loc[idx, "constant"] = cap
+        n.global_constraints.loc[idx, "sense"] = "<="
+        if "type" in n.global_constraints.columns:
+            n.global_constraints.loc[idx, "type"] = "primary energy"
+    else:
+        n.add("GlobalConstraint",
+              "CO2Limit",
+              carrier_attribute="co2_emissions",
+              sense="<=",
+              constant=cap,
+              type="primary energy")
 
 def rescale_to_mapping(p_set_series, mapping):
 
@@ -1071,10 +1131,12 @@ def add_aviation(n, cost):
     airports["p_set"] = airports["fraction"].apply(
         lambda frac: frac * aviation_demand * 1e6 / 8760
     )
-    print('airport sum:')
+    print('plane before sum:')
     print(airports["p_set"].sum())
     airports["p_set"]=airports["p_set"]*factor_transport
-
+    print('plane sum after:')
+    print(airports["p_set"].sum())
+    print(airports["p_set"])
 
     airports = pd.concat([airports, ind])
 
@@ -1092,17 +1154,27 @@ def add_aviation(n, cost):
 
     if snakemake.config["sector"]["international_bunkers"]:
         co2 = airports["p_set"].sum() * costs.at["oil", "CO2 intensity"]
+        print('CO2 emissions from international bunkers:', co2)
     else:
         domestic_to_total = energy_totals["total domestic aviation"] / (
             energy_totals["total international aviation"]
             + energy_totals["total domestic aviation"]
         )
 
-        co2 = (
-            airports["p_set"].sum()
-            * domestic_to_total
-            * costs.at["oil", "CO2 intensity"]
-        ).sum()
+        # bugfix CO2
+        iso2 = pd.Index(airports.index.astype(str)).str.extract(r'^([A-Z]{2})', expand=False)
+        airports = airports.copy()
+        airports["iso2"] = iso2
+        p_by_country = airports.groupby("iso2")["p_set"].sum()
+        share = domestic_to_total.reindex(p_by_country.index).fillna(0.0)
+        oil_intensity = costs.at["oil", "CO2 intensity"] 
+        co2_by_country = p_by_country * oil_intensity * share   
+        co2_total = co2_by_country.sum()
+        co2=co2_total
+
+        print('CO2 emissions from domestic aviation:', co2)
+        print("oil intensity:", costs.at["oil", "CO2 intensity"])
+        print("domestic to total:", domestic_to_total)
 
     n.add(
         "Load",
@@ -1429,11 +1501,20 @@ def add_shipping(n, costs):
                 + energy_totals["total international navigation"]
             )
 
-            co2 = (
-                ports["p_set"].sum()
-                * domestic_to_total
-                * costs.at["oil", "CO2 intensity"]
-            ).sum()
+            iso2 = pd.Index(ports.index.astype(str)).str.extract(r'^([A-Z]{2})', expand=False)
+            ports_ = ports.copy()
+            ports_["iso2"] = iso2
+            p_by_country = ports_.groupby("iso2")["p_set"].sum()
+            share = domestic_to_total.reindex(p_by_country.index).fillna(0.0)
+            oil_intensity = costs.at["oil", "CO2 intensity"] 
+            co2_by_country = p_by_country * oil_intensity * share   
+            co2_total = co2_by_country.sum()
+            co2=co2_total
+            print('shipping')
+            print('CO2 emissions from domestic aviation:', co2)
+            print("oil intensity:", costs.at["oil", "CO2 intensity"])
+            print("domestic to total:", domestic_to_total)
+
 
         n.add(
             "Load",
@@ -1475,15 +1556,17 @@ def add_industry(n, costs):
     industrial_demand = pd.read_csv(
         snakemake.input.industrial_demand, index_col=0, header=0
     ) 
-    print(industrial_demand.sum().sum())
+    print("industry")
+    print(industrial_demand.sum())
         # --- scale industry demand by country/year ---
     _mapping = load.get("industry", {}).get(investment_year, {})
     print(_mapping)
     # Add carrier Biomass
     print('industry')
     if _mapping:
-        industrial_demand = industrial_demand*rescale_to_mapping( industrial_demand, _mapping)
-        print(industrial_demand)
+        industrial_demand_sum=industrial_demand.drop(columns=['process emissions'], errors='ignore')
+        industrial_demand = industrial_demand*rescale_to_mapping( industrial_demand_sum, _mapping)
+        print(industrial_demand.sum())
     n.madd(
         "Bus",
         spatial.biomass.industry,
@@ -1740,6 +1823,8 @@ def add_industry(n, costs):
         )
         / 8760,
     )
+    print("process emissions")
+    print((industrial_demand["process emissions"]/ 8760).sum())
 
     n.add(
         "Link",
@@ -1954,6 +2039,10 @@ def add_land_transport(n, costs):
             / 8760
             * costs.at["oil", "CO2 intensity"]
         )
+        print("CO2 emissions from land transport oil:", co2)
+        print('ice share:', ice_share)
+        print("ice efficiency:", ice_efficiency)
+        print(transport[spatial.nodes].sum().sum())
 
         n.add(
             "Load",
@@ -2612,7 +2701,6 @@ def add_residential(n, costs):
         columns=n.loads.bus.map(n.buses.location), level=1
     )
     profile_residential = profile_residential.T.groupby(level=[0, 1]).sum().T
-
     p_set_oil = (
         p_set_from_scaling(
             "residential oil", profile_residential, energy_totals, temporal_resolution
@@ -2639,6 +2727,8 @@ def add_residential(n, costs):
 
     resdemand=p_set_oil+p_set_biomass+p_set_gas
     resdemand=resdemand.mul(temporal_resolution, axis=0)
+    print("residentiallllll mapping")
+    print(_mapping)
     if _mapping:
         print('residential')
         scale_res = rescale_to_mapping( resdemand*1e6/8760, _mapping)
@@ -2657,7 +2747,10 @@ def add_residential(n, costs):
     )
 
     # TODO: check 8760 compatibility with different snapshot settings
-    co2 = p_set_oil.sum(axis=1).mean() * costs.at["oil", "CO2 intensity"]
+    co2 = p_set_oil.sum(axis=1).sum() * costs.at["oil", "CO2 intensity"]/8760
+    print("residential oil")
+    print(p_set_oil.sum(axis=1))
+    print(p_set_oil.sum(axis=1).sum())
 
     n.add(
         "Load",
@@ -2685,7 +2778,7 @@ def add_residential(n, costs):
     )
 
     # TODO: check 8760 compatibility with different snapshot settings
-    co2 = p_set_gas.sum(axis=1).mean() * costs.at["gas", "CO2 intensity"]
+    co2 = p_set_gas.sum(axis=1).sum() * costs.at["gas", "CO2 intensity"]/8760
 
     n.add(
         "Load",
@@ -3319,6 +3412,7 @@ if __name__ == "__main__":
                 component="generators",
             )
         )
+        print(existing_capacities)
     else:
         existing_capacities, existing_efficiencies, existing_nodes = 0, None, None
 
@@ -3438,7 +3532,18 @@ if __name__ == "__main__":
 
     if snakemake.config["custom_data"]["water_costs"]:
         add_custom_water_cost(n)
-    add_shedding_and_curtailment_per_node(n, load_shedding_cost=10000000, curtailment_cost=10000000)
+    #add_shedding_and_curtailment_per_node(n, load_shedding_cost=10000000, curtailment_cost=10000000)
+    import numpy as np
+
+    # apply to both generators and links
+    for comp in ["generators", "links"]:
+        df = getattr(n, comp)
+        if "p_nom_extendable" in df.columns:
+            mask = df["p_nom_extendable"].astype(bool)
+            # if extendable, enforce existing capacity as minimum
+            df.loc[mask, "p_nom_min"] = np.maximum(df.loc[mask, "p_nom_min"].fillna(0), df.loc[mask, "p_nom"])
+            # ensure they can still grow
+            df.loc[mask, "p_nom_max"] = np.inf
 
     n.export_to_netcdf(snakemake.output[0])
 

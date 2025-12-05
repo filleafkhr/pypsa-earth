@@ -876,6 +876,13 @@ if __name__ == "__main__":
             "Unexpected missing 'weight' column, which has been manually added. It may be due to missing generators."
         )
         n.generators["weight"] = pd.Series()
+    # --- year-agnostic guard: lock coal/lignite capacity here ---
+    coal_g = n.generators.carrier.str.contains(r"^(coal|lignite)$", case=False, na=False)
+    if coal_g.any():
+        # keep existing p_nom, forbid growth here (sector step will downscale per-year)
+        n.generators.loc[coal_g, "p_nom_extendable"] = False
+        n.generators.loc[coal_g, "p_nom_max"] = n.generators.loc[coal_g, "p_nom"]
+    # ------------------------------------------------------------
 
     n.meta = snakemake.config
     n.export_to_netcdf(snakemake.output[0])

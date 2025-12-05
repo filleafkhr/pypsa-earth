@@ -352,6 +352,141 @@ if __name__ == "__main__":
     ppl = add_custom_powerplants(
         ppl, snakemake.input, snakemake.config
     )  # add carriers from own powerplant files
+    #Lifetime Filters
+    LIFETIME_Y = {
+        "Hard Coal": 30, "Lignite": 35,
+        "Natural Gas": 30, "OCGT": 30, "CCGT": 30,
+        "Oil": 30, "Diesel": 25,
+        "Bioenergy": 30, "Biomass": 30, "Waste": 30,
+        "Hydro": 80, "Geothermal": 40,
+        "Nuclear": 60, "Solar": 25, "Wind": 25,
+    }
+
+    def lifetime_for(fuel):
+        if pd.isna(fuel):
+            return 35
+        f = str(fuel)
+        for k, v in LIFETIME_Y.items():
+            if k.lower() in f.lower():
+                return v
+        return 35
+
+    # normalize key columns
+    for col in ["DateIn", "DateOut"]:
+        if col in ppl.columns:
+            ppl[col] = pd.to_numeric(ppl[col], errors="coerce")
+
+    if "Capacity" in ppl.columns:
+        ppl["Capacity"] = pd.to_numeric(ppl["Capacity"], errors="coerce")
+
+    # keep operating-like statuses if available
+    if "Status" in ppl.columns:
+        ok_status = {"Operating", "operating", "In operation", "Existing"}
+        ppl = ppl[ppl["Status"].isna() | ppl["Status"].astype(str).isin(ok_status)]
+
+    # impute lifetime + DateOut when missing and DateIn known
+    if "Fueltype" not in ppl.columns:
+        ppl["Fueltype"] = np.nan  # safety
+    ppl["Lifetime_est"] = ppl["Fueltype"].map(lifetime_for)
+
+    mask_fill = ppl["DateOut"].isna() & ppl["DateIn"].notna()
+    ppl.loc[mask_fill, "DateOut"] = ppl.loc[mask_fill, "DateIn"] + ppl.loc[mask_fill, "Lifetime_est"]
+
+    # drop rows with neither DateIn nor DateOut (too ambiguous)
+    ppl = ppl[ppl["DateIn"].notna() | ppl["DateOut"].notna()]
+
+    print("🧮 Filled missing DateOut using DateIn + lifetime for", int(mask_fill.sum()), "plants.")
+
+    # keep only plants active in planning year
+    planning_year = int(snakemake.params.get("investment_year",
+                                            snakemake.config.get("investment_year", 2030)))
+    ppl_active = ppl[
+        (ppl["DateIn"].isna()  | (ppl["DateIn"]  <= planning_year)) &
+        (ppl["DateOut"].isna() | (ppl["DateOut"] >= planning_year))
+    ].copy()
+
+    # (optional) light de-dup if custom merges created near-duplicates
+    for col in ("lat", "lon"):
+        if col in ppl_active.columns:
+            ppl_active[col] = pd.to_numeric(ppl_active[col], errors="coerce")
+    rounder = lambda s: (s*1000).round()/1000 if "float" in str(s.dtype) else s
+    if all(c in ppl_active.columns for c in ["Name","Country","Fueltype","Capacity","lat","lon"]):
+        tmp = ppl_active.assign(lat_r=rounder(ppl_active["lat"]), lon_r=rounder(ppl_active["lon"]))
+        before = len(tmp)
+        ppl_active = tmp.drop_duplicates(subset=["Name","Country","Fueltype","Capacity","lat_r","lon_r"]).drop(columns=["lat_r","lon_r"])
+        print(f"🧹 De-duplicated plants: {before - len(ppl_active)} removed")
+
+    # tidy: drop helper col
+    ppl = ppl_active.drop(columns=["Lifetime_est"], errors="ignore")
+
+    # quick coal sanity
+    coal_mask = ppl["Fueltype"].astype(str).str.contains("coal|lignite", case=False, na=False)
+    print(f"🔎 Remaining active plants in {planning_year}: {len(ppl)}  |  coal+lignite MWₑ: {ppl.loc[coal_mask,'Capacity'].sum():,.1f}")
+   # ---- BEGIN: coal phase-out helper (fixed) ----
+    cfg_cp = snakemake.config.get("electricity", {}).get("coal_phaseout", {})
+    phaseout_on   = bool(cfg_cp.get("enable", False))
+    target_year   = int(cfg_cp.get("end_year", 2050))
+    min_age_years = int(cfg_cp.get("min_age", 15))
+
+    # Normalize basic fields
+    for c in ["DateIn", "DateOut", "Capacity", "Efficiency"]:
+        if c in ppl.columns:
+            ppl[c] = pd.to_numeric(ppl[c], errors="coerce")
+
+    # Identify coal/lignite
+    is_coal = ppl["Fueltype"].astype(str).str.contains("coal|lignite", case=False, na=False)
+
+    # Fill missing DateOut for coal/lignite using your lifetime_for()
+    mask_fill_coal = is_coal & ppl["DateOut"].isna() & ppl["DateIn"].notna()
+    if mask_fill_coal.any():
+        fill_vals = (ppl.loc[mask_fill_coal, "DateIn"].astype(float) +
+                    ppl.loc[mask_fill_coal, "Fueltype"].map(lifetime_for).astype(float)).values
+        ppl.loc[mask_fill_coal, "DateOut"] = fill_vals
+
+    # If phaseout is ON: reassign retirement years so ALL coal/lignite are out by target_year
+    # retiring *lowest efficiency first* (ties -> older first, then larger first).
+    if phaseout_on:
+        eff_series = ppl["Efficiency"].where(ppl["Efficiency"].notna(), 0.33)
+
+        cand = ppl[is_coal].copy()
+        if not cand.empty:
+            cand["DateIn"] = cand["DateIn"].fillna(1980)   # fallback for ordering
+            cand["__eff"]  = eff_series.loc[cand.index].fillna(0.33)
+
+            # Order: least efficient first, then oldest, then biggest
+            cand.sort_values(by=["__eff", "DateIn", "Capacity"],
+                            ascending=[True, True, False], inplace=True)
+
+            # Retirement schedule from planning_year to target_year, with min-age gate
+            planning_year = int(snakemake.params.get("investment_year",
+                                snakemake.config.get("investment_year", 2030)))
+
+            # Gate: earliest allowed retirement = max(planning_year, DateIn + min_age)
+            earliest_ok = np.maximum(cand["DateIn"].values + min_age_years, planning_year)
+
+            n_cand = len(cand)                     # <-- use n_cand, do NOT touch 'n'
+            if n_cand > 0:
+                # Linear ranks from planning_year to target_year
+                ranks = np.linspace(planning_year, target_year, n_cand).round()
+                # Proposed retirement = max(min-age gate, linear rank)
+                new_out = np.maximum(earliest_ok, ranks).astype(int)
+
+                # Apply: pull earlier but never later than existing DateOut (if present), cap to target_year
+                current_out = ppl.loc[cand.index, "DateOut"].to_numpy()
+                current_out = np.where(np.isnan(current_out), new_out, np.minimum(current_out.astype(int), new_out))
+                current_out = np.minimum(current_out, target_year)
+
+                ppl.loc[cand.index, "DateOut"] = current_out
+
+    # Keep only plants active in the investment year
+    planning_year = int(snakemake.params.get("investment_year",
+                        snakemake.config.get("investment_year", 2030)))
+    ppl = ppl[
+        (ppl["DateIn"].isna()  | (ppl["DateIn"]  <= planning_year)) &
+        (ppl["DateOut"].isna() | (ppl["DateOut"] >= planning_year))
+    ].copy()
+    # ---- END: coal phase-out helper ----
+
 
     cntries_without_ppl = [c for c in countries_codes if c not in ppl.Country.unique()]
 
