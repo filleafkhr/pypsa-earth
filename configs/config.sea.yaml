@@ -214,6 +214,7 @@ costs:
 fossil_reserves:
   oil: 19212.76 #TWh 11.8 billion bbo
   coal: 100 #fillea todo
+  gas: 
 export:
   endogenous: false # COULDD BE WHY INFEASIBLE
   h2export: [0] #demand in twh

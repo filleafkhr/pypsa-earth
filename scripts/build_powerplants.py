@@ -101,6 +101,7 @@ The following assumptions were done to map custom OSM-extracted power plants wit
 """
 
 import os
+import re
 
 import geopandas as gpd
 import numpy as np
@@ -422,70 +423,6 @@ if __name__ == "__main__":
     # quick coal sanity
     coal_mask = ppl["Fueltype"].astype(str).str.contains("coal|lignite", case=False, na=False)
     print(f"🔎 Remaining active plants in {planning_year}: {len(ppl)}  |  coal+lignite MWₑ: {ppl.loc[coal_mask,'Capacity'].sum():,.1f}")
-   # ---- BEGIN: coal phase-out helper (fixed) ----
-    cfg_cp = snakemake.config.get("electricity", {}).get("coal_phaseout", {})
-    phaseout_on   = bool(cfg_cp.get("enable", False))
-    target_year   = int(cfg_cp.get("end_year", 2050))
-    min_age_years = int(cfg_cp.get("min_age", 15))
-
-    # Normalize basic fields
-    for c in ["DateIn", "DateOut", "Capacity", "Efficiency"]:
-        if c in ppl.columns:
-            ppl[c] = pd.to_numeric(ppl[c], errors="coerce")
-
-    # Identify coal/lignite
-    is_coal = ppl["Fueltype"].astype(str).str.contains("coal|lignite", case=False, na=False)
-
-    # Fill missing DateOut for coal/lignite using your lifetime_for()
-    mask_fill_coal = is_coal & ppl["DateOut"].isna() & ppl["DateIn"].notna()
-    if mask_fill_coal.any():
-        fill_vals = (ppl.loc[mask_fill_coal, "DateIn"].astype(float) +
-                    ppl.loc[mask_fill_coal, "Fueltype"].map(lifetime_for).astype(float)).values
-        ppl.loc[mask_fill_coal, "DateOut"] = fill_vals
-
-    # If phaseout is ON: reassign retirement years so ALL coal/lignite are out by target_year
-    # retiring *lowest efficiency first* (ties -> older first, then larger first).
-    if phaseout_on:
-        eff_series = ppl["Efficiency"].where(ppl["Efficiency"].notna(), 0.33)
-
-        cand = ppl[is_coal].copy()
-        if not cand.empty:
-            cand["DateIn"] = cand["DateIn"].fillna(1980)   # fallback for ordering
-            cand["__eff"]  = eff_series.loc[cand.index].fillna(0.33)
-
-            # Order: least efficient first, then oldest, then biggest
-            cand.sort_values(by=["__eff", "DateIn", "Capacity"],
-                            ascending=[True, True, False], inplace=True)
-
-            # Retirement schedule from planning_year to target_year, with min-age gate
-            planning_year = int(snakemake.params.get("investment_year",
-                                snakemake.config.get("investment_year", 2030)))
-
-            # Gate: earliest allowed retirement = max(planning_year, DateIn + min_age)
-            earliest_ok = np.maximum(cand["DateIn"].values + min_age_years, planning_year)
-
-            n_cand = len(cand)                     # <-- use n_cand, do NOT touch 'n'
-            if n_cand > 0:
-                # Linear ranks from planning_year to target_year
-                ranks = np.linspace(planning_year, target_year, n_cand).round()
-                # Proposed retirement = max(min-age gate, linear rank)
-                new_out = np.maximum(earliest_ok, ranks).astype(int)
-
-                # Apply: pull earlier but never later than existing DateOut (if present), cap to target_year
-                current_out = ppl.loc[cand.index, "DateOut"].to_numpy()
-                current_out = np.where(np.isnan(current_out), new_out, np.minimum(current_out.astype(int), new_out))
-                current_out = np.minimum(current_out, target_year)
-
-                ppl.loc[cand.index, "DateOut"] = current_out
-
-    # Keep only plants active in the investment year
-    planning_year = int(snakemake.params.get("investment_year",
-                        snakemake.config.get("investment_year", 2030)))
-    ppl = ppl[
-        (ppl["DateIn"].isna()  | (ppl["DateIn"]  <= planning_year)) &
-        (ppl["DateOut"].isna() | (ppl["DateOut"] >= planning_year))
-    ].copy()
-    # ---- END: coal phase-out helper ----
 
 
     cntries_without_ppl = [c for c in countries_codes if c not in ppl.Country.unique()]
@@ -519,4 +456,112 @@ if __name__ == "__main__":
             col_out="region_id",
         ).rename(columns={"x": "lon", "y": "lat", "country": "Country"})
 
-    ppl.to_csv(snakemake.output.powerplants)
+    
+    def remove_captive_plants(
+        df: pd.DataFrame,
+        *,
+        name_cols=("Name", "Owner", "Operator", "Company", "Project", "Location"),
+        industrial_keywords=(
+            "cement","clinker","steel","smelter","aluminium","aluminum",
+            "refinery","petrochemical","chemical","fertilizer","ammonia",
+            "pulp","paper","mill","sugar","palm","plantation",
+            "mine","mining","nickel","copper","zinc","gold",
+            "industrial park","estate","complex","works"
+        ),
+        keep_reason_column=True,
+    ):
+        """
+        Remove likely captive/autoproducer power plants.
+        
+        Logic:
+        1) If explicit captive/autoproducer/off-grid flags exist, use them.
+        2) Otherwise, fall back to industrial-site keyword detection in text columns.
+        
+        CHP is NOT removed unless explicitly marked as captive by the above logic.
+        
+        Returns
+        -------
+        kept : pd.DataFrame
+            Plants retained (non-captive)
+        removed : pd.DataFrame
+            Plants removed as captive, with 'captive_reason' column (optional)
+        """
+
+        out = df.copy()
+        out.columns = [c.strip() for c in out.columns]
+
+        # -----------------------------
+        # 1) explicit captive flags (best case)
+        # -----------------------------
+        explicit_cols = [
+            c for c in out.columns
+            if re.search(r"(captive|autoproducer|auto\s*producer|off[\s-]*grid|behind[\s-]*the[\s-]*meter|btm|owner\s*type|sector)", c, flags=re.I)
+        ]
+
+        explicit_mask = pd.Series(False, index=out.index)
+        explicit_reason = pd.Series("", index=out.index)
+
+        truthy = {"true","1","yes","y","t"}
+        captive_words = r"(captive|autoproducer|auto\s*producer|behind[\s-]*the[\s-]*meter|btm|off[\s-]*grid)"
+
+        def _norm(s):
+            return s.astype(str).str.strip().str.lower()
+
+        for c in explicit_cols:
+            col = out[c]
+            if col.dtype == bool:
+                m = col.fillna(False)
+            else:
+                s = _norm(col.fillna(""))
+                m = s.isin(truthy) | s.str.contains(captive_words, regex=True, na=False)
+            explicit_mask |= m
+            explicit_reason[m] = f"explicit flag in column '{c}'"
+
+        # -----------------------------
+        # 2) fallback: industrial keyword proxy
+        # -----------------------------
+        name_cols_present = [c for c in name_cols if c in out.columns]
+        if name_cols_present:
+            blob = out[name_cols_present].astype(str).agg(" ".join, axis=1).str.lower()
+            pattern = r"|".join(re.escape(k) for k in industrial_keywords)
+            keyword_mask = blob.str.contains(pattern, regex=True, na=False)
+        else:
+            keyword_mask = pd.Series(False, index=out.index)
+
+        # -----------------------------
+        # choose which signal to use
+        # -----------------------------
+        use_explicit = explicit_mask.any()
+        is_captive = explicit_mask if use_explicit else keyword_mask
+
+        reason = pd.Series("", index=out.index)
+        if use_explicit:
+            reason[is_captive] = explicit_reason[is_captive]
+        else:
+            reason[is_captive] = "industrial keyword proxy (no explicit captive flag in file)"
+
+        # -----------------------------
+        # split outputs
+        # -----------------------------
+        kept = out.loc[~is_captive].copy()
+        removed = out.loc[is_captive].copy()
+
+        if keep_reason_column and len(removed):
+            removed["captive_reason"] = reason[is_captive]
+
+        return kept, removed
+
+
+    ppl_kept, ppl_removed = remove_captive_plants(ppl)
+
+    logger.info(
+        f"Removed captive plants: {len(ppl_removed)} rows, "
+        f"{ppl_removed['Capacity'].sum():.1f} MW (if Capacity exists)."
+    )
+
+    # optional: save removed list for transparency/debugging
+    #ppl_removed.to_csv(snakemake.output.powerplants.replace(".csv", "_removed_captive.csv"), index=False)
+
+    # write final output
+    ppl_kept.to_csv(snakemake.output.powerplants, index=False)
+
