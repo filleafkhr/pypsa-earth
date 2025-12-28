@@ -1328,7 +1328,8 @@ rule override_respot:
     params:
         run=run["name"],
         custom_data=config["custom_data"],
-        countries=config["countries"],
+        countries=config["countries"], 
+        load_options=config["load_options"],
     input:
         **{
             f"custom_res_pot_{tech}_{planning_horizons}_{discountrate}": "resources/"

@@ -343,8 +343,8 @@ if __name__ == "__main__":
 
     # If multi-year dict: pick the dict for the current year
     if isinstance(raw_scale, dict) and current_year in raw_scale:
-        scale = raw_scale[current_year]
-        logger.info(f"Using year-specific scale for {current_year}")
+        scale = 1
+        logger.info(f"scaling will be done in the override respot")
     else:
         scale = raw_scale
         logger.info(f"Using default/global scale {scale}")

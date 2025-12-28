@@ -18,26 +18,181 @@ from add_existing_baseyear import add_build_year_to_new_assets
 
 logger = logging.getLogger(__name__)
 idx = pd.IndexSlice
-def add_curtailment_penalty(n, curtailment_cost_eur_per_mwh=100.0, sink_bus="curtailment_sink"):
-    # global sink bus
-    if sink_bus not in n.buses.index:
-        n.add("Bus", sink_bus, carrier="curtailment")
 
-    # per-AC bus link to sink with a positive marginal cost (penalty)
-    ac_buses = n.buses.index[n.buses.carrier == "AC"]
-    link_names = [f"{b} -> {sink_bus} curtailment" for b in ac_buses]
+def normalize_key(k: str) -> str:
+    return k.strip().lower().replace("_", " ").replace("-", " ")
 
-    n.madd(
-        "Link",
-        link_names,
-        bus0=ac_buses,
-        bus1=sink_bus,
-        carrier="curtailment",
-        p_nom_extendable=True,
-        p_min_pu=0.0,
-        efficiency=0.0,                 # energy disappears
-        marginal_cost=curtailment_cost_eur_per_mwh
-    )
+def any_match(series, patterns):
+    if series.empty:
+        return series
+    pat = "|".join([f"({p})" for p in patterns])
+    return series.str.contains(pat, case=False, regex=True, na=False)
+
+
+def _bus_country_map(n):
+    if "country" in n.buses.columns:
+        return n.buses["country"]
+    return n.buses.index.to_series().str.extract(r"^([A-Z]{2})")[0].rename("country")
+
+def _country_of(n, df, comp):
+    buscol = "bus" if comp in ("Generator","FuelGenerator","Store") else "bus1"
+    return _bus_country_map(n).reindex(df[buscol]).fillna("")
+
+def apply_storage_country_rules(n, cfg):
+    """
+    Applies enable/disable and cost overrides for storage-related assets.
+
+    YAML example:
+    -------------
+    feature_switches:
+    storage_country_rules: true
+
+    storage_rules:
+    - country: "PH"
+        enable: false
+        carriers: ["battery","battery charger","battery discharger"]
+
+    - country: "ID"
+        enable: true
+        carriers: ["battery"]
+        mult: {"capital_cost": 0.95}
+
+    - country: "*"
+        enable: true
+        carriers: ["home battery"]
+    """
+    if not cfg.get("feature_switches", {}).get("storage_country_rules", False):
+        print("⚙️  storage_country_rules: OFF")
+        return
+
+    rules = cfg.get("storage_rules", [])
+    if not rules:
+        print("⚙️  storage_country_rules: no rules found")
+        return
+
+    # component tables and their country series
+    G, L, S = n.generators, n.links, n.stores
+    g_country = _country_of(n, G, "Generator") if not G.empty else pd.Series([], index=G.index, dtype=str)
+    l_country = _country_of(n, L, "Link")      if not L.empty else pd.Series([], index=L.index, dtype=str)
+    s_country = _country_of(n, S, "Store")     if not S.empty else pd.Series([], index=S.index, dtype=str)
+
+    def build_mask(df, country_series, country_filter, carriers):
+        if df.empty:
+            return pd.Series(False, index=df.index)
+
+        if carriers == ["*"]:
+            mask_carrier = pd.Series(True, index=df.index)
+        else:
+            carriers_lower = {c.lower() for c in carriers}
+            mask_carrier = df["carrier"].str.lower().isin(carriers_lower)
+
+        if isinstance(country_filter, str):
+            if country_filter == "*":
+                mask_country = pd.Series(True, index=df.index)
+            else:
+                mask_country = (country_series == country_filter)
+        elif isinstance(country_filter, (list, tuple, set)):
+            mask_country = country_series.isin(list(country_filter))
+        else:
+            mask_country = pd.Series(False, index=df.index)
+
+        return mask_carrier & mask_country
+
+    def apply_rule_to_df(df, country_series, rule):
+        if df.empty:
+            return
+        country_filter = rule.get("country", "*")
+        carriers       = rule.get("carriers", ["*"])
+        enable         = rule.get("enable", None)
+        fields         = rule.get("fields", {}) or {}
+        mult           = rule.get("mult", {}) or {}
+
+        m = build_mask(df, country_series, country_filter, carriers)
+        if not m.any():
+            return
+
+        if enable is not None:
+            enable_bool = bool(enable)
+            if "p_nom_extendable" in df.columns:
+                df.loc[m, "p_nom_extendable"] = enable_bool
+                if "p_nom_max" in df.columns:
+                    df.loc[m, "p_nom_max"] = np.inf if enable_bool else df.loc[m, "p_nom"]
+
+            if "e_nom_extendable" in df.columns:
+                df.loc[m, "e_nom_extendable"] = enable_bool
+                if "e_nom_max" in df.columns:
+                    df.loc[m, "e_nom_max"] = np.inf if enable_bool else df.loc[m, "e_nom"]
+
+        for k, fac in mult.items():
+            if k in df.columns:
+                df.loc[m, k] = df.loc[m, k] * float(fac)
+
+        for k, val in fields.items():
+            if k in df.columns:
+                df.loc[m, k] = val
+
+    for r in rules:
+        apply_rule_to_df(G, g_country, r)
+        apply_rule_to_df(L, l_country, r)
+        apply_rule_to_df(S, s_country, r)
+
+    print(f"applied {len(rules)} storage_country_rules")
+
+
+def apply_gas_trade_adjustments(n, cfg):
+    if not cfg.get("feature_switches", {}).get("gas_trade_adjustments", False):
+        print("gas_trade_adjustments: OFF")
+        return
+
+    trade = cfg.get("gas_trade", {})
+    importers = list(trade.get("importers", []))
+    exporters = list(trade.get("exporters", []))
+    imp_adj = trade.get("importer_adjustment", {}) or {}
+    exp_adj = trade.get("exporter_adjustment", {}) or {}
+
+    g = n.generators
+    if not g.empty and "carrier" in g.columns:
+        g_country = _country_of(n, g, "FuelGenerator")
+        is_gas_fuel = g.carrier.str.lower().eq("gas")
+
+        if importers and "fuel_marginal_cost_add" in imp_adj:
+            m = is_gas_fuel & g_country.isin(importers)
+            if m.any(): g.loc[m, "marginal_cost"] += float(imp_adj["fuel_marginal_cost_add"])
+
+        if exporters and "fuel_marginal_cost_add" in exp_adj:
+            m = is_gas_fuel & g_country.isin(exporters)
+            if m.any(): g.loc[m, "marginal_cost"] += float(exp_adj["fuel_marginal_cost_add"])
+
+    L = n.links
+    if L.empty: return
+    l_country = _country_of(n, L, "Link")
+    is_ccgt = L.carrier.str.lower().eq("ccgt")
+    is_ocgt = L.carrier.str.lower().eq("ocgt")
+
+    def _apply_link_adjust(countries, adj):
+        if not countries or not adj: return
+        mask_country = l_country.isin(list(countries))
+
+        if "ccgt_vom_add" in adj:
+            m = mask_country & is_ccgt
+            if m.any(): L.loc[m, "marginal_cost"] += float(adj["ccgt_vom_add"])
+        if "ocgt_vom_add" in adj:
+            m = mask_country & is_ocgt
+            if m.any(): L.loc[m, "marginal_cost"] += float(adj["ocgt_vom_add"])
+
+        if "ccgt_capex_mult" in adj:
+            m = mask_country & is_ccgt
+            if m.any(): L.loc[m, "capital_cost"] *= float(adj["ccgt_capex_mult"])
+        if "ocgt_capex_mult" in adj:
+            m = mask_country & is_ocgt
+            if m.any(): L.loc[m, "capital_cost"] *= float(adj["ocgt_capex_mult"])
+
+    _apply_link_adjust(importers, imp_adj)
+    _apply_link_adjust(exporters, exp_adj)
+
+    print("applied gas_trade_adjustments")
+
+
 
 
 def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbose=True):
@@ -426,377 +581,6 @@ if __name__ == "__main__":
     disable_grid_expansion_if_limit_hit(n)
     elec_cfg = snakemake.config.get("electricity", {})
     apply_coal_supplier_phaseout(n, year, elec_cfg, verbose=True)
-    # === REBALANCE MIX (no external 'costs' needed) ===
-
-
-    def add_curtailment_penalty(n, penalty=100.0, sink_bus="curtailment_sink"):
-        if sink_bus not in n.buses.index:
-            n.add("Bus", sink_bus, carrier="curtailment")
-        ac_buses = n.buses.index[n.buses.carrier == "AC"]
-        link_names = [f"{b} -> {sink_bus} curtailment" for b in ac_buses]
-        to_add = [ln for ln in link_names if ln not in n.links.index]
-        if to_add:
-            sel = [ln.split(" -> ")[0] for ln in to_add]
-            n.madd("Link", to_add,
-                bus0=sel, bus1=sink_bus,
-                carrier="curtailment",
-                p_nom_extendable=True, p_min_pu=0.0,
-                efficiency=0.0, marginal_cost=penalty)
-        else:
-            n.links.loc[n.links.carrier=="curtailment","marginal_cost"] = penalty
-
-    def guess_biomass_intensity(n, default=0.35):
-        """tCO2 per MWh_fuel. Uses carriers.co2_emissions if present; else default."""
-        try:
-            if hasattr(n, "carriers") and "co2_emissions" in n.carriers.columns:
-                for label in ["solid biomass","biomass","wood"]:
-                    if label in n.carriers.index:
-                        val = n.carriers.at[label, "co2_emissions"]
-                        if pd.notna(val):
-                            return float(val)
-        except Exception:
-            pass
-        return float(default)
-
-    def rebalance_generation(
-        n,
-        curtailment_cost=100.0,
-        solar_mc=3.0,
-        h2_el_mc=2.0,
-        h2_node_cap_mw=500,
-        h2_rt_eff=0.95,
-        h2_store_capex_mult=1.5,
-        onwind_cap_mw=3000,
-        offac_cap_mw=5000,
-        offdc_cap_mw=5000,
-        solar_site_cap_mw=3000,
-        beop_cap_mw=300,
-        co2_store_capex_mult=2.0,
-        co2_store_e_nom_max_t=5e8,
-        biomass_intensity_t_per_mwh=None,
-    ):
-        # 1) penalise curtailment
-        add_curtailment_penalty(n, curtailment_cost)
-
-        # 2) H2 electrolysis not bottomless
-        m_el = n.links.carrier.str.contains("H2 Electrolysis", case=False, regex=False)
-        if m_el.any():
-            n.links.loc[m_el, "marginal_cost"] = h2_el_mc
-            n.links.loc[m_el, "p_nom_max"] = (
-                n.links.loc[m_el, "p_nom_max"].replace([np.inf], np.nan).fillna(h2_node_cap_mw).clip(upper=h2_node_cap_mw)
-            )
-            # (optional) tie per-node cap to 30% of node peak load if higher
-            if not n.loads_t.p_set.empty:
-                node_peak = n.loads_t.p_set.groupby(n.loads.bus, axis=1).sum().max()
-                for bus, peak in node_peak.items():
-                    idx = n.links.index[m_el & (n.links.bus1 == f"{bus} H2")]
-                    if len(idx):
-                        n.links.loc[idx, "p_nom_max"] = np.maximum(
-                            n.links.loc[idx, "p_nom_max"].fillna(0).values,
-                            0.3 * float(peak)
-                        )
-
-        # H2 storage cost & round-trip
-        for carr in ["H2 UHS charger","H2 UHS discharger"]:
-            m = n.links.carrier.str.contains(carr, case=False, regex=False)
-            if m.any():
-                n.links.loc[m, "efficiency"] = h2_rt_eff
-        m_h2_store = n.stores.carrier.isin(["H2 UHS","H2 Store Tank"])
-        if m_h2_store.any():
-            n.stores.loc[m_h2_store, "capital_cost"] = n.stores.loc[m_h2_store, "capital_cost"] * h2_store_capex_mult
-
-        # 3) unlock wind with finite per-site caps
-        for tech, cap in [("onwind", onwind_cap_mw), ("offwind-ac", offac_cap_mw), ("offwind-dc", offdc_cap_mw)]:
-            m = n.generators.carrier.str.contains(tech, case=False, regex=False)
-            if m.any():
-                n.generators.loc[m, "p_nom_extendable"] = True
-                pmax = n.generators.loc[m, "p_nom_max"].replace([np.inf], np.nan).fillna(cap)
-                n.generators.loc[m, "p_nom_max"] = pmax
-
-        # 4) solar cap + small marginal cost
-        m_sol = n.generators.carrier.str.contains("solar", case=False, regex=False)
-        if m_sol.any():
-            pmax = n.generators.loc[m_sol, "p_nom_max"].replace([np.inf], np.nan).fillna(solar_site_cap_mw)
-            n.generators.loc[m_sol, "p_nom_max"] = pmax
-            n.generators.loc[m_sol, "marginal_cost"] = solar_mc
-
-        # 5) biomass EOP emits CO2; cap biomass; bound CO2 store
-        if biomass_intensity_t_per_mwh is None:
-            biomass_intensity_t_per_mwh = guess_biomass_intensity(n, default=0.35)
-
-        # ensure columns exist
-        for col in ["bus2","efficiency2"]:
-            if col not in n.links.columns:
-                n.links[col] = np.nan
-
-        m_beop = n.links.carrier.str.contains("biomass EOP", case=False, regex=False)
-        if m_beop.any():
-            n.links.loc[m_beop, "bus2"] = "co2 atmosphere"
-            n.links.loc[m_beop, "efficiency2"] = biomass_intensity_t_per_mwh
-            cur = n.links.loc[m_beop, "p_nom_max"].replace([np.inf], np.nan).fillna(0)
-            n.links.loc[m_beop, "p_nom_max"] = np.where(cur <= 0, beop_cap_mw, cur)
-
-        m_co2s = n.stores.carrier == "co2 stored"
-        if m_co2s.any():
-            n.stores.loc[m_co2s, "capital_cost"] = n.stores.loc[m_co2s, "capital_cost"] * co2_store_capex_mult
-            n.stores.loc[m_co2s, "e_nom_extendable"] = True
-            n.stores.loc[m_co2s, "e_nom_max"] = co2_store_e_nom_max_t
-
-        # 6) allow grid expansion so wind isn’t stranded
-        if "s_nom_extendable" in n.lines:
-            n.lines["s_nom_extendable"] = True
-        m_dc = n.links.carrier.str.contains("DC", case=False, regex=False)
-        if m_dc.any():
-            n.links.loc[m_dc, "p_nom_extendable"] = True
-
-        # 7) helpful warnings
-        if hasattr(n.generators_t, "p_max_pu"):
-            for tech in ["onwind","offwind"]:
-                gens = n.generators.index[n.generators.carrier.str.contains(tech, case=False, regex=False)]
-                missing = [g for g in gens if g not in n.generators_t.p_max_pu.columns]
-                if missing:
-                    print(f"[warn] missing {tech} CF for {len(missing)} sites → they won't build")
-
-    # run the adjustments
-    rebalance_generation(n)
-
-    # quick sanity prints (pre-solve)
-    try:
-        print("curtailment penalty:", float(n.links.loc[n.links.carrier=="curtailment","marginal_cost"].iloc[0]), "€/MWh")
-    except Exception:
-        pass
-    print("H2 electrolysis sites:", int((n.links.carrier.str.contains('H2 Electrolysis', case=False, regex=False)).sum()))
-    print("solar sites capped:", int((n.generators.carrier.str.contains('solar', case=False, regex=False)).sum()))
-    # === module: apply_cost_overrides ===
-
-    def normalize_key(k: str) -> str:
-        return k.strip().lower().replace("_", " ").replace("-", " ")
-
-    def any_match(series, patterns):
-        if series.empty:
-            return series
-        pat = "|".join([f"({p})" for p in patterns])
-        return series.str.contains(pat, case=False, regex=True, na=False)
-
-    
-    def _bus_country_map(n):
-        if "country" in n.buses.columns:
-            return n.buses["country"]
-        return n.buses.index.to_series().str.extract(r"^([A-Z]{2})")[0].rename("country")
-
-    def _country_of(n, df, comp):
-        buscol = "bus" if comp in ("Generator","FuelGenerator","Store") else "bus1"
-        return _bus_country_map(n).reindex(df[buscol]).fillna("")
-
-    def apply_storage_country_rules(n, cfg):
-        """
-        Applies enable/disable and cost overrides for storage-related assets.
-
-        YAML example:
-        -------------
-        feature_switches:
-        storage_country_rules: true
-
-        storage_rules:
-        - country: "PH"
-            enable: false
-            carriers: ["battery","battery charger","battery discharger"]
-
-        - country: "ID"
-            enable: true
-            carriers: ["battery"]
-            mult: {"capital_cost": 0.95}
-
-        - country: "*"
-            enable: true
-            carriers: ["home battery"]
-        """
-        if not cfg.get("feature_switches", {}).get("storage_country_rules", False):
-            print("⚙️  storage_country_rules: OFF")
-            return
-
-        rules = cfg.get("storage_rules", [])
-        if not rules:
-            print("⚙️  storage_country_rules: no rules found")
-            return
-
-        # component tables and their country series (indices match each df)
-        G, L, S = n.generators, n.links, n.stores
-        g_country = _country_of(n, G, "Generator") if not G.empty else pd.Series([], index=G.index, dtype=str)
-        l_country = _country_of(n, L, "Link")      if not L.empty else pd.Series([], index=L.index, dtype=str)
-        s_country = _country_of(n, S, "Store")     if not S.empty else pd.Series([], index=S.index, dtype=str)
-
-        def build_mask(df, country_series, country_filter, carriers):
-            """Return a boolean mask over df.index for this rule."""
-            if df.empty:
-                return pd.Series(False, index=df.index)
-
-            # carrier mask
-            if carriers == ["*"]:
-                mask_carrier = pd.Series(True, index=df.index)
-            else:
-                carriers_lower = {c.lower() for c in carriers}
-                mask_carrier = df["carrier"].str.lower().isin(carriers_lower)
-
-            # country mask
-            if isinstance(country_filter, str):
-                if country_filter == "*":
-                    mask_country = pd.Series(True, index=df.index)
-                else:
-                    mask_country = (country_series == country_filter)
-            elif isinstance(country_filter, (list, tuple, set)):
-                mask_country = country_series.isin(list(country_filter))
-            else:
-                mask_country = pd.Series(False, index=df.index)
-
-            return mask_carrier & mask_country
-
-        def apply_rule_to_df(df, country_series, rule):
-            """Apply one YAML rule to one component df."""
-            if df.empty:
-                return
-
-            country_filter = rule.get("country", "*")
-            carriers       = rule.get("carriers", ["*"])
-            enable         = rule.get("enable", None)
-            fields         = rule.get("fields", {}) or {}
-            mult           = rule.get("mult", {}) or {}
-
-            m = build_mask(df, country_series, country_filter, carriers)
-            if not m.any():
-                return
-
-            # enable / disable (extendability + caps)
-            if enable is not None:
-                enable_bool = bool(enable)
-
-                # power capacity (Links / some Generators)
-                if "p_nom_extendable" in df.columns:
-                    df.loc[m, "p_nom_extendable"] = enable_bool
-                    if "p_nom_max" in df.columns:
-                        if enable_bool:
-                            df.loc[m, "p_nom_max"] = np.inf
-                        elif "p_nom" in df.columns:
-                            df.loc[m, "p_nom_max"] = df.loc[m, "p_nom"]
-
-                # energy capacity (Stores)
-                if "e_nom_extendable" in df.columns:
-                    df.loc[m, "e_nom_extendable"] = enable_bool
-                    if "e_nom_max" in df.columns:
-                        if enable_bool:
-                            df.loc[m, "e_nom_max"] = np.inf
-                        elif "e_nom" in df.columns:
-                            df.loc[m, "e_nom_max"] = df.loc[m, "e_nom"]
-
-            # multipliers (e.g. 0.95 * capital_cost)
-            for k, fac in mult.items():
-                if k in df.columns:
-                    df.loc[m, k] = df.loc[m, k] * float(fac)
-
-            # absolute overrides
-            for k, val in fields.items():
-                if k in df.columns:
-                    df.loc[m, k] = val
-
-        # apply every rule to every component
-        for r in rules:
-            apply_rule_to_df(G, g_country, r)
-            apply_rule_to_df(L, l_country, r)
-            apply_rule_to_df(S, s_country, r)
-
-        print(f"✅ applied {len(rules)} storage_country_rules")
-
-    def apply_gas_trade_adjustments(n, cfg):
-        """
-        Adjust gas-related costs based on importer/exporter role.
-
-        YAML example:
-        -------------
-        feature_switches:
-        gas_trade_adjustments: true
-
-        gas_trade:
-        importers: ["ID","PH","VN"]
-        exporters: ["MY","BN"]
-        importer_adjustment:
-            fuel_marginal_cost_add: 3.0   # €/MWh_fuel to add to gas fuel generators
-            ccgt_vom_add: 0.3             # €/MWh_e to add on CCGT link marginal_cost
-            ocgt_vom_add: 0.3
-            ccgt_capex_mult: 1.05
-            ocgt_capex_mult: 1.05
-        exporter_adjustment:
-            fuel_marginal_cost_add: -2.0
-            ccgt_vom_add: -0.2
-            ocgt_vom_add: -0.2
-            ccgt_capex_mult: 0.97
-            ocgt_capex_mult: 0.97
-        """
-        if not cfg.get("feature_switches", {}).get("gas_trade_adjustments", False):
-            print("⚙️  gas_trade_adjustments: OFF")
-            return
-
-        trade = cfg.get("gas_trade", {})
-        importers = list(trade.get("importers", []))
-        exporters = list(trade.get("exporters", []))
-        imp_adj = trade.get("importer_adjustment", {}) or {}
-        exp_adj = trade.get("exporter_adjustment", {}) or {}
-
-        # -------- 1) fuel price: n.generators (gas fuel) --------
-        g = n.generators
-        if not g.empty and "carrier" in g.columns:
-            g_country = _country_of(n, g, "FuelGenerator")
-            is_gas_fuel = g.carrier.str.lower().eq("gas")
-
-            if importers and "fuel_marginal_cost_add" in imp_adj:
-                m = is_gas_fuel & g_country.isin(importers)
-                if m.any():
-                    g.loc[m, "marginal_cost"] += float(imp_adj["fuel_marginal_cost_add"])
-
-            if exporters and "fuel_marginal_cost_add" in exp_adj:
-                m = is_gas_fuel & g_country.isin(exporters)
-                if m.any():
-                    g.loc[m, "marginal_cost"] += float(exp_adj["fuel_marginal_cost_add"])
-
-        # -------- 2) plant economics: n.links (CCGT / OCGT) --------
-        L = n.links
-        if L.empty:
-            return
-
-        l_country = _country_of(n, L, "Link")
-        is_ccgt = L.carrier.str.lower().eq("ccgt")
-        is_ocgt = L.carrier.str.lower().eq("ocgt")
-
-        def _apply_link_adjust(countries, adj):
-            if not countries or not adj:
-                return
-            mask_country = l_country.isin(list(countries))
-
-            # VOM (marginal_cost) adders
-            if "ccgt_vom_add" in adj:
-                m = mask_country & is_ccgt
-                if m.any():
-                    L.loc[m, "marginal_cost"] += float(adj["ccgt_vom_add"])
-            if "ocgt_vom_add" in adj:
-                m = mask_country & is_ocgt
-                if m.any():
-                    L.loc[m, "marginal_cost"] += float(adj["ocgt_vom_add"])
-
-            # CAPEX multipliers
-            if "ccgt_capex_mult" in adj:
-                m = mask_country & is_ccgt
-                if m.any():
-                    L.loc[m, "capital_cost"] *= float(adj["ccgt_capex_mult"])
-            if "ocgt_capex_mult" in adj:
-                m = mask_country & is_ocgt
-                if m.any():
-                    L.loc[m, "capital_cost"] *= float(adj["ocgt_capex_mult"])
-
-        _apply_link_adjust(importers, imp_adj)
-        _apply_link_adjust(exporters, exp_adj)
-
-        print("✅ applied gas_trade_adjustments")
-
-
     apply_gas_trade_adjustments(n, snakemake.config)
     apply_storage_country_rules(n, snakemake.config)
 
