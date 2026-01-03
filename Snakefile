@@ -16,7 +16,7 @@ from _helpers import (
     get_last_commit_message,
     check_config_version,
     copy_default_files,
-    BASE_DIR,
+    BASE_DIR,branch,
 )
 from build_demand_profiles import get_load_paths_gegis
 from retrieve_databundle_light import (
@@ -738,6 +738,43 @@ rule simplify_network:
     script:
         "scripts/simplify_network.py"
 
+solar_rooftop_config = config["sector"]["solar_rooftop"]
+if isinstance(solar_rooftop_config, dict):
+    solar_rooftop_enable = (
+        solar_rooftop_config["enable"] and solar_rooftop_config["use_building_size"]
+    )
+    solar_rooftop_params = {
+        "solar_rooftop_enable": solar_rooftop_enable,
+        "install_ratio": solar_rooftop_config["install_ratio"],
+        "tolerance": solar_rooftop_config["tolerance"],
+    }
+else:
+    solar_rooftop_params = {}
+    solar_rooftop_enable = config["sector"]["solar_rooftop"]
+
+if config["enable"].get("download_global_buildings", True):
+
+    rule download_global_buildings:
+        params:
+            crs=config["crs"],
+        output:
+            "data/global_buildings/{country}_global_buildings_raw.parquet",
+        script:
+            "scripts/download_global_buildings.py"
+    
+if solar_rooftop_enable:
+    rule cluster_global_buildings:
+        params:
+            **solar_rooftop_params,
+            crs=config["crs"],
+        input:
+            country_buildings="data/global_buildings/{country}_global_buildings_raw.parquet",
+            regions_onshore="resources/" + RDIR + "bus_regions/regions_onshore_elec_s{simpl}_{clusters}.geojson",
+        output:
+            solar_rooftop_layout="resources/" + RDIR + "solar_rooftop/solar_rooftop_layout_elec_s{simpl}_{clusters}_{country}.csv",
+        script:
+            "scripts/cluster_global_buildings.py"
+
 
 if config["augmented_line_connection"].get("add_to_snakefile", False) == True:
 
@@ -1271,6 +1308,13 @@ rule prepare_sector_network:
             + SECDIR
             + "gas_networks/gas_network_elec_s{simpl}_{clusters}.csv"
         ),
+        solar_rooftop_layout=branch(
+            solar_rooftop_enable,
+            "resources/"
+            + RDIR
+            + "solar_rooftop/solar_rooftop_layout_elec_s{simpl}_{clusters}_{country}.csv",
+        ),
+
     output:
         RESDIR
         + "prenetworks/elec_s{simpl}_{clusters}_ec_l{ll}_{opts}_{sopts}_{planning_horizons}_{discountrate}_{demand}.nc",
@@ -1803,6 +1847,12 @@ if config["foresight"] == "overnight":
         script:
             "scripts/solve_network.py"
 
+rule make_all_sector_summaries:
+    input:
+        expand(
+            SDIR + "csvs/costs_{planning_horizons}.csv",
+            planning_horizons=config["scenario"]["planning_horizons"],
+        )
 
 rule make_sector_summary:
     params:
@@ -1832,26 +1882,26 @@ rule make_sector_summary:
             **config["export"],
         ),
     output:
-        nodal_costs=SDIR + "csvs/nodal_costs.csv",
-        nodal_capacities=SDIR + "csvs/nodal_capacities.csv",
-        nodal_cfs=SDIR + "csvs/nodal_cfs.csv",
-        cfs=SDIR + "csvs/cfs.csv",
-        costs=SDIR + "csvs/costs.csv",
-        capacities=SDIR + "csvs/capacities.csv",
-        curtailment=SDIR + "csvs/curtailment.csv",
-        energy=SDIR + "csvs/energy.csv",
-        supply=SDIR + "csvs/supply.csv",
-        supply_energy=SDIR + "csvs/supply_energy.csv",
-        prices=SDIR + "csvs/prices.csv",
-        weighted_prices=SDIR + "csvs/weighted_prices.csv",
-        market_values=SDIR + "csvs/market_values.csv",
-        price_statistics=SDIR + "csvs/price_statistics.csv",
-        metrics=SDIR + "csvs/metrics.csv",
+        nodal_costs=SDIR + "csvs/nodal_costs_{planning_horizons}.csv",
+        nodal_capacities=SDIR + "csvs/nodal_capacities_{planning_horizons}.csv",
+        nodal_cfs=SDIR + "csvs/nodal_cfs_{planning_horizons}.csv",
+        cfs=SDIR + "csvs/cfs_{planning_horizons}.csv",
+        costs=SDIR + "csvs/costs_{planning_horizons}.csv",
+        capacities=SDIR + "csvs/capacities_{planning_horizons}.csv",
+        curtailment=SDIR + "csvs/curtailment_{planning_horizons}.csv",
+        energy=SDIR + "csvs/energy_{planning_horizons}.csv",
+        supply=SDIR + "csvs/supply_{planning_horizons}.csv",
+        supply_energy=SDIR + "csvs/supply_energy_{planning_horizons}.csv",
+        prices=SDIR + "csvs/prices_{planning_horizons}.csv",
+        weighted_prices=SDIR + "csvs/weighted_prices_{planning_horizons}.csv",
+        market_values=SDIR + "csvs/market_values_{planning_horizons}.csv",
+        price_statistics=SDIR + "csvs/price_statistics_{planning_horizons}.csv",
+        metrics=SDIR + "csvs/metrics_{planning_horizons}.csv",
     threads: 2
     resources:
         mem_mb=10000,
     benchmark:
-        SDIR + "benchmarks/make_summary"
+        SDIR + "benchmarks/make_summary_{planning_horizons}.txt"
     script:
         "scripts/make_summary.py"
 

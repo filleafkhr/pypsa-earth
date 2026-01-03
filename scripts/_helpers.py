@@ -112,6 +112,23 @@ def create_logger(logger_name, level=logging.INFO):
     sys.excepthook = handle_exception
     return logger
 
+def branch(condition, then, otherwise=None):
+    """
+    This is a placeholder function that exists in Snakemake versions > 8.3.0.
+    It can be removed once Snakemake is updated to a compatible version.
+    """
+    if condition:
+        return then
+
+    if otherwise is None:
+        if isinstance(then, dict):
+            return {}
+        elif isinstance(then, str):
+            return []
+        else:
+            return None
+
+    return otherwise
 
 def read_osm_config(*args):
     """

@@ -20,9 +20,9 @@ scenario:
   clusters: [60]
   planning_horizons: 
   - 2030
-  #- 2035
-  #- 2040
-  #- 2045  
+  - 2035
+  - 2040
+  - 2045  
   - 2050  
   demand: 
   - "ASEAN"
@@ -167,9 +167,9 @@ electricity:
   use_relative_targets: true
   co2_relative_targets:
     2030: 2.5 #1.8504  # 2,215.2 Mt CO2-eq in 2022
-    2035: 1.5
-    2040: 1
-    2045: 0.5
+    2035: 2
+    2040: 1.5
+    2045: 1
     2050: 0.5
   #automatic_emission: true  # COULDD BE WHY INFEASIBLE
   #powerplants_filter: (DateOut >= 2030) or DateOut != DateOut)
@@ -214,7 +214,6 @@ costs:
 fossil_reserves:
   oil: 19212.76 #TWh 11.8 billion bbo
   coal: 100 #fillea todo
-  gas: 
 export:
   endogenous: false # COULDD BE WHY INFEASIBLE
   h2export: [0] #demand in twh
