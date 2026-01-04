@@ -4,7 +4,7 @@
 
 foresight: myopic
 
-countries: [BN, KH, ID, LA, MY, MM, PH, SG, TH, VN, TL]
+countries: [BN, KH, ID, LA, MY, MM, PH, SG, TH, VN] 
 
 enable:
   retrieve_databundle: false 
@@ -26,9 +26,9 @@ scenario:
   - 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-6h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
+  opts: [Co2L-3h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "6h"
+  - "3h"
 
 snapshots:
   start: "2018-01-01"
@@ -41,7 +41,6 @@ cluster_options:
     p_threshold_drop_isolated: 0 
     p_threshold_merge_isolated: 0 
     s_threshold_fetch_isolated: 0.1 
-  #alternative_clustering: true
 
 subregion: 
   define_by_gadm:
@@ -66,7 +65,7 @@ subregion:
       PH.48_1, PH.49_1, PH.53_1, PH.67_1, PH.70_1, PH.72_1, PH.73_1, PH.74_1, PH.75_1, PH.77_1, PH.79_1, PH.80_1, PH.81_1]
 
 
-load_options: #fillea todo
+load_options: 
   prediction_year: 2050  
   scale:
     electricity:
@@ -162,7 +161,6 @@ load_options: #fillea todo
 
 
 electricity:
-#Fillea todo
   co2limit: 1e+9 #1e+9 20% #AEO6
   use_relative_targets: true
   co2_relative_targets:
@@ -171,12 +169,7 @@ electricity:
     2040: 1.5
     2045: 1
     2050: 0.5
-  #automatic_emission: true  # COULDD BE WHY INFEASIBLE
-  #powerplants_filter: (DateOut >= 2030) or DateOut != DateOut)
-  operational_reserve: 
-    activate: false 
-    epsilon_load: 0.025 
-    epsilon_vres: 0.025 
+  powerplants_filter: (DateOut >= 2030) or DateOut != DateOut)
   extendable_carriers:
     Generator: [solar, onwind, offwind-ac, offwind-dc, OCGT, CCGT]
     StorageUnit: [battery, H2] 
@@ -192,41 +185,21 @@ links:
 costs: 
   year: 2050
   discountrate: [0.05] 
-  #Fillea todo : No data available for SEA 
-  marginal_cost: # EUR/MWh
-    solar: 10.
-    onwind: 1.
-    offwind: 1.
-    hydro: 0.  #4.68 USD/MWh
-    H2: 0. 
-    electrolysis: 0.
-    fuel cell: 0.
-    battery: 0.
-    battery inverter: 0.
-  emission_prices: # in currency per tonne emission, only used with the option Ep
-    co2: 0.
-  override:
-    marginal_cost:
-      solar: 10
-      onwind: 1
-      offwind: 1
+  # for scenario
+  #override:
+    #marginal_cost:
+      #solar: 10
+      #onwind: 1
+      #offwind: 1
   
 fossil_reserves:
   oil: 19212.76 #TWh 11.8 billion bbo
-  coal: 100 #fillea todo
+  coal: 65651.8 #9,408.4 million tons (Mt), 6000 kcal/kg = 6.978 megawatt-hours (MWh)/ton
+
 export:
-  endogenous: false # COULDD BE WHY INFEASIBLE
-  h2export: [0] #demand in twh
-  #store_capital_costs: "standard_costs" # ["standard_costs", "no_costs"] # specifies the costs of the export store. "standard_costs" takes CAPEX of "hydrogen storage tank type 1 including compressor"
-
-custom_data: #look for datac
-  gas_network: true # used osm data as placeholder 
-
-
+  h2export: [0] #no export outside of the ASEAN region
+  
 sector:
-  gas:
-    spatial_gas: true 
-    network: false 
   hydrogen:
     network: false
     network_routes: greenfield 
@@ -238,7 +211,7 @@ sector:
     ASEAN_2035: 0.08
     ASEAN_2040: 0.12
     ASEAN_2045: 0.16
-    ASEAN_2050: 0.20 #0.09% in transport share 
+    ASEAN_2050: 0.20 # in transport share 
   land_transport_electric_share:
     ASEAN_2030: 0.12 
     ASEAN_2035: 0.24
@@ -250,7 +223,7 @@ sector:
     ASEAN_2035: 0.08
     ASEAN_2040: 0.12
     ASEAN_2045: 0.16
-    ASEAN_2050: 0.20 #0.09% in transport share 
+    ASEAN_2050: 0.20 # in transport share 
   co2_network: false 
   biomass_transport: false
   solid_biomass_potential: 1089 # TWh/a, biomass residues 
@@ -265,9 +238,6 @@ sector:
   co2_sequestration_cost: 37.66 #EUR/tCO2 for sequestration of CO2, ASEAN max=450$/Ton
   shipping_hydrogen_liquefaction: false
   space_heat_share: 0
-  #Fillea todo
-  tes: true
-  solar_cf_correction: 0.788457 # = >>>1/1.2683
   h2_cavern: false
   methanation: false
   helmeth: false
@@ -289,14 +259,6 @@ focus_weights: # Focus weights based on land area
   SG: 0.000128
   TH: 0.118773
   VN: 0.077600
-
-clean_osm_data_options:
-  use_custom_lines: add_custom
-  path_custom_lines: ../pypsa-sea-data/custom_osm/custom_lines_exist_new_.geojson
-  use_custom_substations: add_custom
-  path_custom_substations: ../pypsa-sea-data/custom_osm/custom_substations_exist_new_.geojson
-
-  
 
 transmission_projects:
   enable: true

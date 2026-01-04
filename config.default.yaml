@@ -215,8 +215,7 @@ electricity:
   hvdc_as_lines: false # should HVDC lines be modeled as `Line` or as `Link` component?
   automatic_emission: false
   automatic_emission_base_year: 1990 # 1990 is taken as default. Any year from 1970 to 2018 can be selected.
-  base_network: osm-plus-prebuilt
-  base_network_version: 0.1
+  base_network: osm-prebuilt
 
   operational_reserve: # like https://genxproject.github.io/GenX/dev/core/#Reserves
     activate: false
