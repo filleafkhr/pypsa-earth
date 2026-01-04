@@ -17,7 +17,7 @@ enable:
 
 scenario:
   ll: ["copt"] 
-  clusters: [60]
+  clusters: [75]
   planning_horizons: 
   - 2030
   - 2035
