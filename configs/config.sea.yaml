@@ -169,7 +169,7 @@ electricity:
     2040: 1.5
     2045: 1
     2050: 0.5
-  powerplants_filter: (DateOut >= 2030) or DateOut != DateOut)
+  powerplants_filter: "(DateOut >= 2030) or (DateOut != DateOut)" 
   extendable_carriers:
     Generator: [solar, onwind, offwind-ac, offwind-dc, OCGT, CCGT]
     StorageUnit: [battery, H2] 
@@ -263,8 +263,7 @@ focus_weights: # Focus weights based on land area
 transmission_projects:
   enable: true
   include:
-    #EO8 - Fin: true
-    EO8: true
+    EO8 - Final: true
   status:
   - in_planning
   - under_consideration
