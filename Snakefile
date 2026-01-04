@@ -1410,7 +1410,7 @@ rule prepare_transport_data:
         + SECDIR
         + "energy_totals_{demand}_{planning_horizons}.csv",
         traffic_data_KFZ="data/emobility/KFZ_ASEAN",
-        traffic_data_Pkw="data/emobility/Pkw_ASEAN",
+        traffic_data_Pkw="data/emobility/PKW_ASEAN",
         transport_name="resources/" + SECDIR + "transport_data.csv",
         clustered_pop_layout="resources/"
         + SECDIR
