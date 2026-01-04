@@ -17,7 +17,7 @@ enable:
 
 scenario:
   ll: ["copt"] 
-  clusters: [75]
+  clusters: [79]
   planning_horizons: 
   - 2030
   - 2035
@@ -26,9 +26,9 @@ scenario:
   - 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-3h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
+  opts: [Co2L-6h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "3h"
+  - "6h"
 
 snapshots:
   start: "2018-01-01"
