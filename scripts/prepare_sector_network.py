@@ -1156,10 +1156,13 @@ def add_aviation(n, cost):
         co2 = airports["p_set"].sum() * costs.at["oil", "CO2 intensity"]
         print('CO2 emissions from international bunkers:', co2)
     else:
-        domestic_to_total = energy_totals["total domestic aviation"] / (
-            energy_totals["total international aviation"]
-            + energy_totals["total domestic aviation"]
-        )
+        dom = energy_totals["total domestic aviation"].fillna(0.0)
+        intl = energy_totals["total international aviation"].fillna(0.0)
+        den = dom + intl
+
+        domestic_to_total = pd.Series(0.0, index=energy_totals.index)
+        mask = den > 0
+        domestic_to_total.loc[mask] = dom.loc[mask] / den.loc[mask]
 
         # bugfix CO2
         iso2 = pd.Index(airports.index.astype(str)).str.extract(r'^([A-Z]{2})', expand=False)
@@ -1496,10 +1499,13 @@ def add_shipping(n, costs):
         if snakemake.config["sector"]["international_bunkers"]:
             co2 = ports["p_set"].sum() * costs.at["oil", "CO2 intensity"]
         else:
-            domestic_to_total = energy_totals["total domestic navigation"] / (
-                energy_totals["total domestic navigation"]
-                + energy_totals["total international navigation"]
-            )
+            dom = energy_totals["total domestic aviation"].fillna(0.0)
+            intl = energy_totals["total international aviation"].fillna(0.0)
+            den = dom + intl
+
+            domestic_to_total = pd.Series(0.0, index=energy_totals.index)
+            mask = den > 0
+            domestic_to_total.loc[mask] = dom.loc[mask] / den.loc[mask]
 
             iso2 = pd.Index(ports.index.astype(str)).str.extract(r'^([A-Z]{2})', expand=False)
             ports_ = ports.copy()
@@ -2927,6 +2933,21 @@ def add_electricity_distribution_grid(n, costs):
             f"Adding solar rooftop technology with potential based on {solar_logger}"
         )
 
+        print("example solar names:", list(solar[:]))
+        print("potential has DC solar?", any("-DC" in s for s in potential.index))
+        print("missing examples:", list(solar.difference(potential.index)[:]))
+        # Handle missing potentials caused by geometry mismatches 
+        missing = solar.difference(potential.index)
+        if len(missing):
+            logger.warning(
+                f"missing solar potentials for {len(missing)} entries; setting p_nom_max=0. "
+                f"missing={list(missing)}"
+            )
+
+        p_nom_max_ = potential.reindex(solar).fillna(0.0)
+
+
+
         n.madd(
             "Generator",
             solar,
@@ -2934,7 +2955,7 @@ def add_electricity_distribution_grid(n, costs):
             bus=n.generators.loc[solar, "bus"] + " low voltage",
             carrier="solar rooftop",
             p_nom_extendable=True,
-            p_nom_max=potential.loc[solar],
+            p_nom_max= p_nom_max_, #potential.loc[solar],
             marginal_cost=n.generators.loc[solar, "marginal_cost"],
             capital_cost=costs.at["solar-rooftop", "fixed"],
             efficiency=n.generators.loc[solar, "efficiency"],
