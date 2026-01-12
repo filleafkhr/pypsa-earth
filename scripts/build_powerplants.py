@@ -560,8 +560,52 @@ if __name__ == "__main__":
     )
 
     # optional: save removed list for transparency/debugging
-    #ppl_removed.to_csv(snakemake.output.powerplants.replace(".csv", "_removed_captive.csv"), index=False)
+    ppl_removed.to_csv(snakemake.output.powerplants.replace(".csv", "_removed_captive_coal.csv"), index=False)
+    # -----------------------------
+    # ensure stable unique plant ids for downstream hydro profiles etc.
+    # -----------------------------
+    ppl_out = ppl_kept.copy()
 
-    # write final output
-    ppl_kept.to_csv(snakemake.output.powerplants, index=False)
+    # choose a base id column that exists
+    # (PM usually has projectID / EIC / id; if not, fall back to a constructed key)
+    base_id_col = None
+    for cand in ["projectID", "EIC", "id", "ID"]:
+        if cand in ppl_out.columns:
+            base_id_col = cand
+            break
+
+    if base_id_col is None:
+        # last resort: construct something deterministic
+        ppl_out["ppl_id"] = (
+            ppl_out["Country"].astype(str) + "__" +
+            ppl_out["Name"].astype(str) + "__" +
+            ppl_out["lat"].round(5).astype(str) + "__" +
+            ppl_out["lon"].round(5).astype(str) + "__" +
+            ppl_out["Fueltype"].astype(str) + "__" +
+            ppl_out["Technology"].astype(str)
+        )
+    else:
+        # keep original id for matching/debug
+        ppl_out["ppl_id"] = ppl_out[base_id_col].astype(str)
+
+    # now create the CSV INDEX that must be unique (this is what downstream uses as plant key)
+    idx = ppl_out["ppl_id"].astype(str)
+
+    if not idx.is_unique:
+        # suffix duplicates but keep ppl_id unchanged
+        counts = idx.groupby(idx).cumcount() + 1
+        idx_unique = idx.where(counts == 1, idx + "__" + counts.astype(str))
+        logger.warning(
+            "powerplants.csv: fixed %d duplicate plant ids in index (suffix __2, __3, ...)",
+            int((counts > 1).sum()),
+        )
+    else:
+        idx_unique = idx
+
+    ppl_out.index = pd.Index(idx_unique, name="plant")
+
+    # IMPORTANT: write WITH index so first column = plant id
+    ppl_out.to_csv(snakemake.output.powerplants, index=True)
+
+
 
