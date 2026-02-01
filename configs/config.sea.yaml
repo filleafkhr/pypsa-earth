@@ -10,7 +10,7 @@ enable:
   retrieve_databundle: false 
   retrieve_databundle_sector: false
   retrieve_cost_data: true 
-  download_osm_data: false 
+  download_osm_data: true 
   build_natura_raster: false 
   build_cutout: false
   renewable_profiles: true 
@@ -26,9 +26,9 @@ scenario:
   - 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-6h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
+  opts: [Co2L-3h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "6h"
+  - "3h"
 
 snapshots:
   start: "2018-01-01"
@@ -243,7 +243,9 @@ sector:
   helmeth: false
   dac: false
   SMR: false
+  chp: false
   SMR CC: false
+  v2g: false
   lignite:
     spatial_lignite: true
 

@@ -765,27 +765,62 @@ def estimate_renewable_capacities_irena(
     p_nom_max = estimate_renewable_capacities_config["p_nom_max"]
     p_nom_min = estimate_renewable_capacities_config["p_nom_min"]
 
-    if len(countries) == 0:
-        return
-    if len(tech_map) == 0:
+    if len(countries) == 0 or len(tech_map) == 0:
         return
 
     if stats == "irena":
-        capacities = pm.data.IRENASTAT().powerplant.convert_country_to_alpha2()
+        capacities_raw = pm.data.IRENASTAT().powerplant.convert_country_to_alpha2()
     else:
         logger.info(
             f"Selected renewable capacity estimation statistics {stats} is not available, applying greenfield scenario instead"
         )
         return
 
+    # ---------------- DEBUG BLOCK (START) ----------------
+    logger.info("=== DEBUG estimate_renewable_capacities_irena ===")
+    logger.info(f"year={year} stats={stats}")
+    logger.info(f"tech_keys (from config): {tech_keys}")
+    logger.info(f"countries_config sample: {countries[:15]} (n={len(countries)})")
+
+    # show similar tech names in the dataset to catch exact-string mismatches
+    techs_in_data = sorted(set(capacities_raw["Technology"].astype(str).unique()))
+    suspects = [t for t in techs_in_data if ("hydro" in t.lower()) or ("run" in t.lower()) or ("river" in t.lower())]
+    logger.info(f"IR ENA Technology suspects (hydro/run/river) sample: {suspects[:50]}")
+
+    # verify each configured key exists in the dataset
+    missing_keys = [k for k in tech_keys if k not in set(techs_in_data)]
+    if missing_keys:
+        logger.info(f"WARNING: these tech_keys are NOT present in IRENA data: {missing_keys}")
+
+    # verify country coverage
+    missing_countries = sorted(set(countries).difference(set(capacities_raw["Country"].unique())))
+    if missing_countries:
+        logger.info(f"WARNING: countries missing from IRENA after alpha2 conversion: {missing_countries}")
+
+    # check filtered rows before groupby
+    filt = capacities_raw.query("Year == @year and Technology in @tech_keys and Country in @countries")
+    logger.info(f"rows after filter (Year/Tech/Country): {len(filt)}")
+    if len(filt):
+        logger.info(f"filtered Technology values: {sorted(filt.Technology.unique())}")
+        logger.info(f"filtered Country values sample: {sorted(filt.Country.unique())[:30]}")
+    else:
+        # extra: show how many rows you get if you drop one filter at a time
+        filt_year_tech = capacities_raw.query("Year == @year and Technology in @tech_keys")
+        logger.info(f"rows with Year+Tech only: {len(filt_year_tech)}")
+        filt_year_country = capacities_raw.query("Year == @year and Country in @countries")
+        logger.info(f"rows with Year+Country only: {len(filt_year_country)}")
+        filt_tech_country = capacities_raw.query("Technology in @tech_keys and Country in @countries")
+        logger.info(f"rows with Tech+Country only: {len(filt_tech_country)}")
+    # ---------------- DEBUG BLOCK (END) ----------------
+
     # Check if countries are in country list of stats
-    missing = list(set(countries).difference(capacities.Country.unique()))
+    missing = list(set(countries).difference(capacities_raw.Country.unique()))
     if missing:
         logger.info(
             f"The countries {missing} are not provided in the stats and hence not scaled"
         )
 
-    capacities = capacities.query(
+    capacities = capacities_raw.query(
         "Year == @year and Technology in @tech_keys and Country in @countries"
     )
     capacities = capacities.groupby(["Technology", "Country"]).Capacity.sum()
@@ -796,6 +831,17 @@ def estimate_renewable_capacities_irena(
     )
 
     for ppm_technology, techs in tech_map.items():
+        # ---------------- per-tech DEBUG ----------------
+        logger.info(f"--- DEBUG tech loop: ppm_technology={ppm_technology}, mapped carriers={techs} ---")
+        tech_i = n.generators.query("carrier in @techs").index
+        logger.info(f"generators matched in network: {len(tech_i)} (sample: {list(tech_i[:5])})")
+        if len(tech_i):
+            logger.info(
+                "before: "
+                f"p_nom_min_sum={n.generators.loc[tech_i,'p_nom_min'].sum() if 'p_nom_min' in n.generators.columns else 'NA'} "
+                f"p_nom_max_inf_count={np.isinf(n.generators.loc[tech_i,'p_nom_max']).sum()}"
+            )
+
         if ppm_technology not in capacities.index:
             logger.info(
                 f"technology {ppm_technology} is not provided by {stats} and therefore not estimated"
@@ -805,36 +851,34 @@ def estimate_renewable_capacities_irena(
         tech_capacities = capacities.loc[ppm_technology].reindex(
             countries, fill_value=0.0
         )
-        tech_i = n.generators.query("carrier in @techs").index
+        logger.info(f"IR ENA installed capacity total for {ppm_technology}: {tech_capacities.sum()} MW")
+
         n.generators.loc[tech_i, "p_nom"] = (
             (
                 n.generators_t.p_max_pu[tech_i].mean()
                 * n.generators.loc[tech_i, "p_nom_max"]
             )
-            # maximal yearly generation
             .groupby(n.generators.bus.map(n.buses.country))
             .transform(lambda s: normed(s) * tech_capacities.at[s.name])
             .where(lambda s: s > 0.1, 0.0)
-        )  # only capacities above 100kW
+        )
         n.generators.loc[tech_i, "p_nom_min"] = n.generators.loc[tech_i, "p_nom"]
 
         if p_nom_min:
-            assert np.isscalar(p_nom_min)
-            logger.info(
-                f"Scaling capacity stats to {p_nom_min*100:.2f}% of installed capacity acquired from stats."
-            )
-            n.generators.loc[tech_i, "p_nom_min"] = n.generators.loc[
-                tech_i, "p_nom"
-            ] * float(p_nom_min)
+            n.generators.loc[tech_i, "p_nom_min"] = n.generators.loc[tech_i, "p_nom"] * float(p_nom_min)
 
         if p_nom_max:
-            assert np.isscalar(p_nom_max)
+            n.generators.loc[tech_i, "p_nom_max"] = n.generators.loc[tech_i, "p_nom_min"] * float(p_nom_max)
+
+        # ---------------- after DEBUG ----------------
+        if len(tech_i):
             logger.info(
-                f"Scaling capacity expansion limit to {p_nom_max*100:.2f}% of installed capacity acquired from stats."
+                "after: "
+                f"p_nom_min_sum={n.generators.loc[tech_i,'p_nom_min'].sum()} "
+                f"p_nom_max_inf_count={np.isinf(n.generators.loc[tech_i,'p_nom_max']).sum()} "
+                f"p_nom_max_max={n.generators.loc[tech_i,'p_nom_max'].max()}"
             )
-            n.generators.loc[tech_i, "p_nom_max"] = n.generators.loc[
-                tech_i, "p_nom_min"
-            ] * float(p_nom_max)
+
 
 
 def add_nice_carrier_names(n, config):

@@ -253,9 +253,10 @@ def distribute_clusters(
     if distribution_cluster == ["load"]:
         L = (
             n.loads_t.p_set.mean()
-            .groupby(n.loads.bus).sum()
+            .groupby(n.loads.bus)
+            .sum()
             .reindex(n.buses.index, fill_value=0.0)
-            .groupby([n.buses.country, n.buses.sub_network, n.buses.carrier])
+            .groupby([n.buses.country, n.buses.sub_network])
             .sum()
             .pipe(normed)
         )
@@ -274,13 +275,13 @@ def distribute_clusters(
             df_pop_c, country_list, "standard", year, update, out_logging
         )
         P = df_pop_c.loc[:, ("country", "pop")]
-        n_df = n.buses.copy()[["country", "sub_network", "carrier"]]
+        n_df = n.buses.copy()[["country", "sub_network"]]
 
         pop_dict = P.set_index("country")["pop"].to_dict()
         n_df["pop"] = n_df["country"].map(pop_dict)
 
         distribution_factor = (
-            n_df.groupby(["country", "sub_network", "carrier"]).sum().pipe(normed).squeeze()
+            n_df.groupby(["country", "sub_network"]).sum().pipe(normed).squeeze()
         )
 
     if distribution_cluster == ["gdp"]:
@@ -296,17 +297,17 @@ def distribute_clusters(
         )
 
         G = df_gdp_c.loc[:, ("country", "gdp")]
-        n_df = n.buses.copy()[["country", "sub_network", "carrier"]]
+        n_df = n.buses.copy()[["country", "sub_network"]]
 
         gdp_dict = G.set_index("country")["gdp"].to_dict()
         n_df["gdp"] = n_df["country"].map(gdp_dict)
 
         distribution_factor = (
-            n_df.groupby(["country", "sub_network", "carrier"]).sum().pipe(normed).squeeze()
+            n_df.groupby(["country", "sub_network"]).sum().pipe(normed).squeeze()
         )
 
     # TODO: 1. Check if sub_networks can be added here i.e. ["country", "sub_network"]
-    N = n.buses.groupby(["country", "sub_network", "carrier"]).size()
+    N = n.buses.groupby(["country", "sub_network"]).size()
 
     assert (
         n_clusters >= len(N) and n_clusters <= N.sum()
@@ -320,8 +321,7 @@ def distribute_clusters(
         ), "The sum of focus weights must be less than or equal to 1."
 
         for country, weight in focus_weights.items():
-            idx_c = distribution_factor.index.get_level_values("country") == country
-            distribution_factor.loc[idx_c] = weight / idx_c.sum()
+            distribution_factor[country] = weight / len(distribution_factor[country])
 
         remainder = [
             c not in focus_weights.keys()
@@ -474,12 +474,12 @@ def busmap_for_n_clusters(
         if isinstance(n_clusters, pd.Series):
             n_cluster_c = n_clusters[x.name]
             if isinstance(x.name, tuple):
-                prefix = f"{x.name[0]}{x.name[1]}-{x.name[2]} "
+                prefix = x.name[0] + x.name[1] + " "
             else:
                 prefix = x.name + " "
         else:
             n_cluster_c = n_clusters
-            prefix = f"{x.name[0]}{x.name[1]}-{x.name[2]} "
+            prefix = x.name[0] + x.name[1] + " "
 
         logger.debug(f"Determining busmap for country {prefix[:-1]}")
         if len(x) == 1:
@@ -515,7 +515,7 @@ def busmap_for_n_clusters(
     return (
         n.buses.groupby(
             # ["country"],
-            ["country", "sub_network", "carrier"],  # TODO: 2. Add sub_networks (see previous TODO)
+            ["country", "sub_network"],  # TODO: 2. Add sub_networks (see previous TODO)
             group_keys=False,
         )
         .apply(busmap_for_country, include_groups=False)
@@ -659,7 +659,7 @@ if __name__ == "__main__":
     elif snakemake.wildcards.clusters == "all":
         n_clusters = len(n.buses)
     elif snakemake.wildcards.clusters == "min":
-        n_clusters = n.buses.groupby(["country", "sub_network", "carrier"]).size().count()
+        n_clusters = n.buses.groupby(["country", "sub_network"]).size().count()
     else:
         n_clusters = int(snakemake.wildcards.clusters)
         aggregate_carriers = None

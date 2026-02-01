@@ -12,7 +12,10 @@ import numpy as np
 import pandas as pd
 import pypsa
 import xarray as xr
-from add_existing_baseyear import add_build_year_to_new_assets
+from add_existing_baseyear import (
+    add_build_year_to_new_assets,
+    filter_transmission_project_build_year,
+)
 
 # from pypsa.clustering.spatial import normed_or_uniform
 
@@ -544,6 +547,136 @@ def disable_grid_expansion_if_limit_hit(n):
 #             # replace renewable time series
 #             n.generators_t.p_max_pu.loc[:, p_max_pu.columns] = p_max_pu
 
+def continuity_merge_after_brownfield(
+    n,
+    year: int,
+    *,
+    merge_generators=True,
+    merge_links=True,
+    # key definitions for “same physical asset”
+    gen_key_cols=("carrier", "bus"),
+    link_key_cols=("carrier", "bus0", "bus1"),
+    # optional filters (leave as None to do all carriers)
+    generator_carriers=None,  # e.g. ["solar","onwind","offwind-ac","offwind-dc","OCGT","CCGT"]
+    link_carriers=None,       # e.g. ["OCGT","CCGT","coal","lignite","H2 pipeline"]
+    set_nom_max_inf=True,
+    verbose=True,
+):
+    """
+    Generic continuity merge to avoid year-suffixed duplicates.
+
+    Idea:
+      - template assets (build_year == year) are potential “new copies”
+      - inherited assets (build_year < year) are what you carried over
+      - if both represent the same physical thing (same key), drop template
+      - then make inherited expandable and set p_nom_min = p_nom
+
+    Works for:
+      - Generators: key=(carrier,bus)
+      - Links:      key=(carrier,bus0,bus1)   (minimal to avoid bus2/bus3 headaches)
+    """
+
+    def _norm(s):
+        return s.astype(str).str.strip().str.lower()
+
+    def _make_key(df, cols):
+        cols = [c for c in cols if c in df.columns]
+        tmp = df.loc[:, cols].copy()
+        if "carrier" in cols:
+            tmp["carrier"] = _norm(tmp["carrier"])
+        for c in cols:
+            if c != "carrier":
+                tmp[c] = tmp[c].fillna("").astype(str)
+        return pd.Series(list(map(tuple, tmp.values)), index=df.index)
+
+    out = {"gen_dropped": 0, "gen_made_extendable": 0,
+           "link_dropped": 0, "link_made_extendable": 0}
+
+    # ---------- GENERATORS ----------
+    if merge_generators and (not n.generators.empty):
+        G = n.generators
+        if "build_year" not in G.columns:
+            raise RuntimeError("n.generators has no build_year (call add_build_year_to_new_assets before brownfield).")
+        if "carrier" not in G.columns or "bus" not in G.columns:
+            if verbose: print("[merge] generators missing carrier/bus, skipping")
+        else:
+            mask = pd.Series(True, index=G.index)
+            if generator_carriers is not None:
+                mask &= _norm(G["carrier"]).isin({_norm(pd.Series(generator_carriers)).iloc[i]
+                                                 for i in range(len(generator_carriers))})
+
+            gen = G.loc[mask]
+            inherited = gen.index[gen.build_year < year]
+            template  = gen.index[gen.build_year == year]
+
+            if len(inherited) and len(template):
+                key_inh = set(_make_key(G.loc[inherited], gen_key_cols).values)
+                key_tpl = _make_key(G.loc[template], gen_key_cols)
+                to_drop = key_tpl.index[key_tpl.isin(key_inh)]
+                if len(to_drop):
+                    n.mremove("Generator", to_drop)
+                    out["gen_dropped"] = int(len(to_drop))
+
+            # re-fetch after potential removals
+            G = n.generators
+            if len(inherited):
+                m = G.index.isin(inherited)
+                if m.any():
+                    # make inherited expandable and “carry” capacity as minimum
+                    if "p_nom" in G.columns:
+                        G.loc[m, "p_nom_min"] = G.loc[m, "p_nom"]
+                    G.loc[m, "p_nom_extendable"] = True
+                    if set_nom_max_inf and ("p_nom_max" in G.columns):
+                        G.loc[m, "p_nom_max"] = np.inf
+                    out["gen_made_extendable"] = int(m.sum())
+
+    # ---------- LINKS ----------
+    if merge_links and (not n.links.empty):
+        L = n.links
+        if "build_year" not in L.columns:
+            raise RuntimeError("n.links has no build_year (call add_build_year_to_new_assets before brownfield).")
+        if "carrier" not in L.columns or "bus0" not in L.columns or "bus1" not in L.columns:
+            if verbose: print("[merge] links missing carrier/bus0/bus1, skipping")
+        else:
+            mask = pd.Series(True, index=L.index)
+            if link_carriers is not None:
+                mask &= _norm(L["carrier"]).isin({_norm(pd.Series(link_carriers)).iloc[i]
+                                                 for i in range(len(link_carriers))})
+
+            links = L.loc[mask]
+            inherited = links.index[links.build_year < year]
+            template  = links.index[links.build_year == year]
+
+            if len(inherited) and len(template):
+                key_inh = set(_make_key(L.loc[inherited], link_key_cols).values)
+                key_tpl = _make_key(L.loc[template], link_key_cols)
+                to_drop = key_tpl.index[key_tpl.isin(key_inh)]
+                if len(to_drop):
+                    n.mremove("Link", to_drop)
+                    out["link_dropped"] = int(len(to_drop))
+
+            # re-fetch after potential removals
+            L = n.links
+            if len(inherited):
+                m = L.index.isin(inherited)
+                if m.any():
+                    if "p_nom" in L.columns:
+                        L.loc[m, "p_nom_min"] = L.loc[m, "p_nom"]
+                    L.loc[m, "p_nom_extendable"] = True
+                    if set_nom_max_inf and ("p_nom_max" in L.columns):
+                        L.loc[m, "p_nom_max"] = np.inf
+                    out["link_made_extendable"] = int(m.sum())
+
+    if verbose:
+        print(
+            f"[continuity_merge] year={year} | "
+            f"gen: dropped={out['gen_dropped']}, made_extendable={out['gen_made_extendable']} | "
+            f"link: dropped={out['link_dropped']}, made_extendable={out['link_made_extendable']}"
+        )
+
+    return out
+
+
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -575,8 +708,10 @@ if __name__ == "__main__":
     add_build_year_to_new_assets(n, year)
 
     n_p = pypsa.Network(snakemake.input.network_p)
-
     add_brownfield(n, n_p, year)
+    continuity_merge_after_brownfield(n,year)
+    if snakemake.params.tp_build_year:
+        filter_transmission_project_build_year(n, year)
 
     disable_grid_expansion_if_limit_hit(n)
     elec_cfg = snakemake.config.get("electricity", {})

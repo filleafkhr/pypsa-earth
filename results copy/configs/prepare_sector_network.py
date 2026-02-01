@@ -1004,49 +1004,33 @@ def add_co2(n, costs):
         p_nom_extendable=True,
     )
 
-    if options["co2_network"]:
-        # logger.info("Adding CO2 network.")
-        co2_links = create_network_topology(n, "CO2 pipeline ")
+    # logger.info("Adding CO2 network.")
+    co2_links = create_network_topology(n, "CO2 pipeline ")
 
-        cost_onshore = (
-            (1 - co2_links.underwater_fraction)
-            * costs.at["CO2 pipeline", "fixed"]
-            * co2_links.length
-        )
-        cost_submarine = (
-            co2_links.underwater_fraction
-            * costs.at["CO2 submarine pipeline", "fixed"]
-            * co2_links.length
-        )
-        capital_cost = cost_onshore + cost_submarine
+    cost_onshore = (
+        (1 - co2_links.underwater_fraction)
+        * costs.at["CO2 pipeline", "fixed"]
+        * co2_links.length
+    )
+    cost_submarine = (
+        co2_links.underwater_fraction
+        * costs.at["CO2 submarine pipeline", "fixed"]
+        * co2_links.length
+    )
+    capital_cost = cost_onshore + cost_submarine
 
-        n.madd(
-            "Link",
-            co2_links.index,
-            bus0=co2_links.bus0.values + " co2 stored",
-            bus1=co2_links.bus1.values + " co2 stored",
-            p_min_pu=-1,
-            p_nom_extendable=True,
-            length=co2_links.length.values,
-            capital_cost=capital_cost.values,
-            carrier="CO2 pipeline",
-            lifetime=costs.at["CO2 pipeline", "lifetime"],
-        )
-
-        # logger.info("Adding CO2 network.")
-        co2_links = create_network_topology(n, "CO2 pipeline ")
-
-        cost_onshore = (
-            (1 - co2_links.underwater_fraction)
-            * costs.at["CO2 pipeline", "fixed"]
-            * co2_links.length
-        )
-        cost_submarine = (
-            co2_links.underwater_fraction
-            * costs.at["CO2 submarine pipeline", "fixed"]
-            * co2_links.length
-        )
-        capital_cost = cost_onshore + cost_submarine
+    n.madd(
+        "Link",
+        co2_links.index,
+        bus0=co2_links.bus0.values + " co2 stored",
+        bus1=co2_links.bus1.values + " co2 stored",
+        p_min_pu=-1,
+        p_nom_extendable=True,
+        length=co2_links.length.values,
+        capital_cost=capital_cost.values,
+        carrier="CO2 pipeline",
+        lifetime=costs.at["CO2 pipeline", "lifetime"],
+    )
 
     n.madd(
         "Store",
@@ -1057,18 +1041,33 @@ def add_co2(n, costs):
         carrier="co2 stored",
         bus=spatial.co2.nodes,
     )
+
+    # logger.info("Adding CO2 network.")
+    co2_links = create_network_topology(n, "CO2 pipeline ")
+
+    cost_onshore = (
+        (1 - co2_links.underwater_fraction)
+        * costs.at["CO2 pipeline", "fixed"]
+        * co2_links.length
+    )
+    cost_submarine = (
+        co2_links.underwater_fraction
+        * costs.at["CO2 submarine pipeline", "fixed"]
+        * co2_links.length
+    )
+    capital_cost = cost_onshore + cost_submarine
     # --- after you added the CO2 buses/stores/loads ---
     cap = co2_cap_from_config(snakemake.config, investment_year)
-    Nyears = float(n.snapshot_weightings.objective.sum()) / 8760.0
-    gc_const = float(cap) * Nyears
 
     # the atmosphere store should be a *tally* (never negative, fixed capacity)
     n.stores.loc["co2 atmosphere", "e_min_pu"] = 0.0           # no negative CO2 in air
     n.stores.loc["co2 atmosphere", "e_initial"] = 0.0
     n.stores.loc["co2 atmosphere", "e_nom_extendable"] = False  # fix capacity instead of extend
-    n.stores.loc["co2 atmosphere", "e_nom"] = gc_const               # hard cap
-    n.stores.loc["co2 atmosphere", "e_nom_max"] = gc_const           # belt & suspenders
-
+    n.stores.loc["co2 atmosphere", "e_nom"] = cap               # hard cap
+    n.stores.loc["co2 atmosphere", "e_nom_max"] = cap           # belt & suspenders
+    
+    Nyears = float(n.snapshot_weightings.objective.sum()) / 8760.0
+    gc_const = float(cap) * Nyears
 
     if not n.global_constraints.empty:
         mask = n.global_constraints.carrier_attribute.fillna("").str.contains("co2", case=False, na=False)
@@ -1077,7 +1076,7 @@ def add_co2(n, costs):
 
     if mask is not None and mask.any():
         idx = n.global_constraints.index[mask]
-        n.global_constraints.loc[idx, "constant"] = gc_const
+        n.global_constraints.loc[idx, "constant"] = cap
         n.global_constraints.loc[idx, "sense"] = "<="
         if "type" in n.global_constraints.columns:
             n.global_constraints.loc[idx, "type"] = "primary energy"
@@ -1086,7 +1085,7 @@ def add_co2(n, costs):
               "CO2Limit",
               carrier_attribute="co2_emissions",
               sense="<=",
-              constant=gc_const,
+              constant=cap,
               type="primary energy")
 
 def rescale_to_mapping(p_set_series, mapping):
@@ -2827,8 +2826,7 @@ def add_residential(n, costs):
 
 def add_electricity_distribution_grid(n, costs):
     logger.info("Adding electricity distribution network")
-    #nodes = pop_layout.index
-    nodes = n.buses.index[n.buses.carrier.isin(["AC", "DC"])].astype(str)
+    nodes = pop_layout.index
 
     n.madd(
         "Bus",

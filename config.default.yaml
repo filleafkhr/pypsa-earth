@@ -152,7 +152,7 @@ base_network:
   cleanup: True # name of the base network, used in the build_cutout.py script  
   cleanup_whitelist:
     #- ["MY", "TH"]
-  name: osm-prebuilt
+  name: 
   clean_interconnectors: True 
 
 
@@ -1111,6 +1111,7 @@ transmission_projects:
     #- planned_not_yet_permitted
     #- under_consideration
   new_link_capacity: zero #keep or zero
+  set_by_build_year: true
 
 feature_switches:
   gas_trade_adjustments: false      # ON/OFF button
