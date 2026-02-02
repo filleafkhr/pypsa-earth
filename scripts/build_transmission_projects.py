@@ -182,22 +182,31 @@ def get_branch_coords_from_geometry(linestring, reversed=False):
 
 
 def get_branch_coords_from_buses(line):
-    """
-    Gets line string for branch component in an pypsa network.
+    # DEBUG: catch the exact offender
+    b0 = str(line.bus0)
+    b1 = str(line.bus1)
 
-    Parameters
-    ----------
-    linestring: shapely linestring
-    reversed (bool, optional): If True, returns the end and start points instead of the start and end points.
-                               Defaults to False.
+    # if either endpoint bus is missing -> you'll see it
+    if (b0 not in n.buses.index) or (b1 not in n.buses.index):
+        print("MISSING BUS IN BASE NETWORK:", getattr(line, "name", "<no-name>"), "bus0=", b0, "bus1=", b1)
+        # return dummy numeric coords so KDTree build doesn't crash BEFORE you see prints
+        return np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
 
-    Returns
-    -------
-    numpy.ndarray: Flattened array of start and end coordinates.
-    """
-    start_coords = n.buses.loc[line.bus0, ["x", "y"]].values
-    end_coords = n.buses.loc[line.bus1, ["x", "y"]].values
+    x0y0 = n.buses.loc[b0, ["x", "y"]]
+    x1y1 = n.buses.loc[b1, ["x", "y"]]
+
+    # if x/y are not numeric, print the exact bus rows
+    if (not np.issubdtype(type(x0y0["x"]), np.number)) or (not np.issubdtype(type(x0y0["y"]), np.number)) \
+       or (not np.issubdtype(type(x1y1["x"]), np.number)) or (not np.issubdtype(type(x1y1["y"]), np.number)):
+        print("NON-NUMERIC BUS COORDS FROM:", getattr(line, "name", "<no-name>"))
+        print("  bus0 row:", b0, x0y0.to_dict())
+        print("  bus1 row:", b1, x1y1.to_dict())
+        return np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
+
+    start_coords = x0y0.astype(float).values
+    end_coords   = x1y1.astype(float).values
     return np.array([start_coords, end_coords]).flatten()
+
 
 
 def get_bus_coords_from_port(linestring, port=0):
@@ -235,6 +244,16 @@ def find_closest_lines(lines, new_lines, distance_upper_bound=0.1, type="new"):
     pandas.Series: Series containing with index the new lines and values providing closest existing line.
     """
 
+    # --- FIX: base network may have no links/lines to compare against ---
+    if lines is None or len(lines) == 0:
+        return pd.Series(dtype=object, name="existing_line")
+
+    # --- FIX: drop broken rows with missing endpoints (NaN bus0/bus1) ---
+    if "bus0" in lines.columns and "bus1" in lines.columns:
+        lines = lines.dropna(subset=["bus0", "bus1"])
+        if len(lines) == 0:
+            return pd.Series(dtype=object, name="existing_line")
+
     # get coordinates of start and end points of all lines, for new lines we need to check both directions
     treelines = lines.apply(get_branch_coords_from_buses, axis=1)
     querylines = pd.concat(
@@ -243,7 +262,7 @@ def find_closest_lines(lines, new_lines, distance_upper_bound=0.1, type="new"):
             new_lines["geometry"].apply(get_branch_coords_from_geometry, reversed=True),
         ]
     )
-    treelines = np.vstack(treelines)
+    treelines = np.vstack(treelines).astype(float)
     querylines = np.vstack(querylines)
     tree = spatial.KDTree(treelines)
     dist, ind = tree.query(querylines, distance_upper_bound=distance_upper_bound)
@@ -617,6 +636,17 @@ if __name__ == "__main__":
     s_max_pu = snakemake.params.s_max_pu
 
     n = pypsa.Network(snakemake.input.base_network)
+        # if any bus coord is literally "bus0" or non-numeric, show it
+    bad_bus_xy = n.buses[["x","y"]].astype(str).apply(lambda s: s.str.contains(r"\bbus0\b", case=False, na=False))
+    if bad_bus_xy.any().any():
+        print("buses with 'bus0' in x/y:")
+        print(n.buses.loc[bad_bus_xy.any(axis=1), ["x","y"]].head(20))
+
+    # if any link has bus0 value == "bus0"
+    bad_links = n.links["bus0"].astype(str).eq("bus0") | n.links["bus1"].astype(str).eq("bus0")
+    if bad_links.any():
+        print("links with literal bus0/bus1 == 'bus0':")
+        print(n.links.loc[bad_links, ["bus0","bus1"]].head(20))
 
     new_lines_df = pd.DataFrame()
     new_links_df = pd.DataFrame()
@@ -631,6 +661,9 @@ if __name__ == "__main__":
     offshore_shapes = gpd.read_file(snakemake.input.offshore_shapes).rename(
         {"name": "country"}, axis=1
     )
+
+
+
 
     transmission_projects = snakemake.params.transmission_projects
     projects = [

@@ -255,7 +255,7 @@ rule build_shapes:
         "benchmarks/" + RDIR + "build_shapes"
     threads: 1
     resources:
-        mem_mb=3096,
+        mem_mb=60000,
     script:
         "scripts/build_shapes.py"
 
@@ -644,7 +644,7 @@ rule build_powerplants:
         "benchmarks/" + RDIR + "build_powerplants"
     threads: 1
     resources:
-        mem_mb=500,
+        mem_mb=50000,
     script:
         "scripts/build_powerplants.py"
 
@@ -2172,6 +2172,7 @@ if config["foresight"] == "myopic":
             sector=config["sector"],
             existing_capacities=config["existing_capacities"],
             costs=config["costs"],
+            tp_build_year=config["transmission_projects"]["set_by_build_year"],
         input:
             network=RESDIR
             + "prenetworks/elec_s{simpl}_{clusters}_ec_l{ll}_{opts}_{sopts}_{planning_horizons}_{discountrate}_{demand}_{h2export}export.nc",
@@ -2244,6 +2245,7 @@ if config["foresight"] == "myopic":
             snapshots=config["snapshots"],
             # drop_leap_day=config["enable"]["drop_leap_day"],
             carriers=config["electricity"]["renewable_carriers"],
+            tp_build_year=config["transmission_projects"]["set_by_build_year"],
         input:
             # unpack(input_profile_tech_brownfield),
             simplify_busmap="resources/" + RDIR + "bus_regions/busmap_elec_s{simpl}.csv",

@@ -381,6 +381,20 @@ def attach_wind_and_solar(
             else:
                 caps = pd.Series(index=ds.indexes["bus"]).fillna(0)
 
+            valid_buses = pd.Index(ds.indexes["bus"]).intersection(n.buses.index)
+            missing_buses = pd.Index(ds.indexes["bus"]).difference(n.buses.index)
+
+            if len(missing_buses):
+                logger.warning(
+                    "Dropping %s buses from %s profiles because they are not in the network (example: %s)",
+                    len(missing_buses), tech, list(missing_buses[:10])
+                )
+
+            ds = ds.sel(bus=valid_buses)
+            if ds.indexes["bus"].empty:
+                continue
+
+
             n.madd(
                 "Generator",
                 ds.indexes["bus"],
@@ -419,6 +433,42 @@ def attach_conventional_generators(
         .join(costs, on="carrier", rsuffix="_r")
         .rename(index=lambda s: "C" + str(s))
     )
+    if ppl.index.duplicated().any():
+        # make a stable unique id based on name + country + bus + carrier + coordinates
+        def _clean(s):
+            return (
+                s.astype(str)
+                .str.strip()
+                .str.replace(r"\s+", "_", regex=True)
+                .str.replace(r"[^0-9A-Za-z_]+", "", regex=True)
+            )
+
+        # choose columns that exist
+        parts = []
+        for col in ["country", "bus", "carrier", "lat", "lon"]:
+            if col in ppl.columns:
+                parts.append(_clean(ppl[col]))
+
+        # base is current index (already "C<name>")
+        base = pd.Series(ppl.index.astype(str), index=ppl.index)
+        base = _clean(base)
+
+        # join parts
+        if parts:
+            suffix = parts[0]
+            for p in parts[1:]:
+                suffix = suffix + "__" + p
+            new_index = base + "__" + suffix
+        else:
+            new_index = base
+
+        ppl.index = pd.Index(new_index.values)
+
+        # if still duplicates, append counter
+        if ppl.index.duplicated().any():
+            cnt = pd.Series(ppl.index).groupby(ppl.index).cumcount().values
+            ppl.index = pd.Index([f"{i}__{k}" if k > 0 else i for i, k in zip(ppl.index, cnt)])
+
     ppl["efficiency"] = ppl.efficiency.fillna(ppl.efficiency)
 
     logger.info(
@@ -426,6 +476,15 @@ def attach_conventional_generators(
             len(ppl), ppl.groupby("carrier").p_nom.sum().div(1e3).round(2)
         )
     )
+        # --- DEBUG duplicates before adding generators ---
+    dups = ppl.index[ppl.index.duplicated(keep=False)]
+    if len(dups):
+        logger.error("Duplicate conventional generator IDs after renaming! count=%s", len(dups))
+        logger.error("Example dup IDs: %s", list(dups[:50]))
+        # show the rows that collide
+        logger.error("Duplicate rows sample:\n%s", ppl.loc[dups].head(20).to_string())
+    # --- END DEBUG ---
+
 
     n.madd(
         "Generator",
@@ -883,6 +942,16 @@ if __name__ == "__main__":
         n.generators.loc[coal_g, "p_nom_extendable"] = False
         n.generators.loc[coal_g, "p_nom_max"] = n.generators.loc[coal_g, "p_nom"]
     # ------------------------------------------------------------
+    print("\n=== FINAL TECH SUMMARY BEFORE EXPORT ===")
+
+    print("Generators by carrier (GW):")
+    print(n.generators.groupby("carrier")["p_nom"].sum().sort_values(ascending=False) / 1e3)
+
+    print("\nStorage units by carrier (GW):")
+    if not n.storage_units.empty:
+        print(n.storage_units.groupby("carrier")["p_nom"].sum() / 1e3)
+    else:
+        print("no storage units")
 
     n.meta = snakemake.config
     n.export_to_netcdf(snakemake.output[0])

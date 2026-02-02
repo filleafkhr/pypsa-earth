@@ -171,6 +171,12 @@ def add_power_capacities_installed_before_baseyear(n, grouping_years, costs, bas
     df_agg.drop(df_agg.index[df_agg.Fueltype.isin(fueltype_to_drop)], inplace=True)
     df_agg.drop(df_agg.index[df_agg.Technology.isin(technology_to_drop)], inplace=True)
     df_agg.Fueltype = df_agg.Fueltype.map(rename_fuel)
+    # ---- SKIP EXISTING COAL / LIGNITE COMPLETELY ----
+    drop_fuels = ["coal"]
+    print(df_agg.Fueltype.unique())
+    df_agg = df_agg[~df_agg.Fueltype.isin(drop_fuels)]
+    logger.info("Skipping existing coal and lignite power plants from baseyear capacities")
+
 
     # Intermediate fix for DateIn & DateOut
     # Fill missing DateIn
@@ -576,6 +582,23 @@ def add_heating_capacities_installed_before_baseyear(
                 ],
             )
 
+def filter_transmission_project_build_year(n, year):
+    """
+    Remove transmission with build year later than the planning horizon
+    """
+    links = n.links[(n.links.project_status != "") & (n.links.build_year > int(year))][
+        ["bus0", "bus1", "build_year", "p_nom"]
+    ]
+    lines = n.lines[(n.lines.build_year > int(year))][
+        ["bus0", "bus1", "build_year", "s_nom"]
+    ]
+
+    logger.info(
+        f"Remove transmission with build year later than {year}: \n{links}\n{lines}"
+    )
+
+    n.mremove("Link", links.index)
+    n.mremove("Line", lines.index)
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -608,6 +631,15 @@ if __name__ == "__main__":
     # define spatial resolution of carriers
     spatial = define_spatial(n.buses[n.buses.carrier == "AC"].index, options)
     add_build_year_to_new_assets(n, baseyear)
+    coal_gen = n.generators[n.generators.carrier.str.contains("coal", case=False, na=False)]
+    coal_link = n.links[n.links.carrier.str.contains("coal", case=False, na=False)]
+
+    print("coal generators MW_e:",
+        coal_gen.p_nom_opt.where(coal_gen.p_nom_extendable, coal_gen.p_nom).sum())
+
+    cap_in = coal_link.p_nom_opt.where(coal_link.p_nom_extendable, coal_link.p_nom)
+    eta = coal_link.efficiency.fillna(1.0)
+    print("coal links output MW_e:", (cap_in * eta).sum())
 
     Nyears = n.snapshot_weightings.generators.sum() / 8760.0
     costs = prepare_costs(
@@ -622,6 +654,18 @@ if __name__ == "__main__":
     add_power_capacities_installed_before_baseyear(
         n, grouping_years_power, costs, baseyear
     )
+    if snakemake.params.tp_build_year:
+        filter_transmission_project_build_year(n, baseyear)
+
+    coal_gen = n.generators[n.generators.carrier.str.contains("coal", case=False, na=False)]
+    coal_link = n.links[n.links.carrier.str.contains("coal", case=False, na=False)]
+
+    print("coal generators MW_e:",
+        coal_gen.p_nom_opt.where(coal_gen.p_nom_extendable, coal_gen.p_nom).sum())
+
+    cap_in = coal_link.p_nom_opt.where(coal_link.p_nom_extendable, coal_link.p_nom)
+    eta = coal_link.efficiency.fillna(1.0)
+    print("coal links output MW_e:", (cap_in * eta).sum())
 
     # TODO: not implemented in -sec yet
     # if options["heating"]:

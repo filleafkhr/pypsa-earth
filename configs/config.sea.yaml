@@ -17,12 +17,12 @@ enable:
 
 scenario:
   ll: ["copt"] 
-  clusters: [75]
+  clusters: [79]
   planning_horizons: 
   - 2030
-  - 2035
+  #- 2035
   - 2040
-  - 2045  
+  #- 2045  
   - 2050  
   demand: 
   - "ASEAN"
@@ -244,6 +244,8 @@ sector:
   dac: false
   SMR: false
   SMR CC: false
+  v2g: false
+  chp: false
   lignite:
     spatial_lignite: true
 
