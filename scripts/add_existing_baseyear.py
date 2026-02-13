@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import powerplantmatching as pm
 import pypsa
+from _helpers import sanitize_carriers, sanitize_locations
 import xarray as xr
 
 # from _helpers import (
@@ -600,6 +601,46 @@ def filter_transmission_project_build_year(n, year):
     n.mremove("Link", links.index)
     n.mremove("Line", lines.index)
 
+def lock_oil_electricity_assets(n):
+    # what we consider "electricity-side" buses
+    elec_bus_carriers = {"AC", "DC", "low voltage"}
+    elec_buses = n.buses.index[n.buses.carrier.isin(elec_bus_carriers)]
+
+    # -----------------
+    # 1) Oil Generators that inject into AC/DC/low voltage
+    # -----------------
+    if "carrier" in n.generators.columns and "bus" in n.generators.columns:
+        gmask = (
+            (n.generators.carrier.astype(str).str.lower() == "oil")
+            & (n.generators.bus.isin(elec_buses))
+        )
+        if gmask.any():
+            # freeze capacity at existing p_nom
+            n.generators.loc[gmask, "p_nom_extendable"] = False
+            n.generators.loc[gmask, "p_nom_min"] = n.generators.loc[gmask, "p_nom"]
+            n.generators.loc[gmask, "p_nom_max"] = n.generators.loc[gmask, "p_nom"]
+
+            logger.info(
+                f"Locked {gmask.sum()} oil electricity Generators as non-extendable."
+            )
+
+    # -----------------
+    # 2) Oil Links that output to AC/DC/low voltage (bus1 is usually the output)
+    # -----------------
+    if "carrier" in n.links.columns and "bus1" in n.links.columns:
+        lmask = (
+            (n.links.carrier.astype(str).str.lower() == "oil")
+            & (n.links.bus1.isin(elec_buses))
+        )
+        if lmask.any():
+            n.links.loc[lmask, "p_nom_extendable"] = False
+            n.links.loc[lmask, "p_nom_min"] = n.links.loc[lmask, "p_nom"]
+            n.links.loc[lmask, "p_nom_max"] = n.links.loc[lmask, "p_nom"]
+
+            logger.info(
+                f"Locked {lmask.sum()} oil electricity Links as non-extendable."
+            )
+
 if __name__ == "__main__":
     if "snakemake" not in globals():
         from _helpers import mock_snakemake
@@ -654,6 +695,7 @@ if __name__ == "__main__":
     add_power_capacities_installed_before_baseyear(
         n, grouping_years_power, costs, baseyear
     )
+    lock_oil_electricity_assets(n) 
     if snakemake.params.tp_build_year:
         filter_transmission_project_build_year(n, baseyear)
 
@@ -700,5 +742,7 @@ if __name__ == "__main__":
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
 
     # sanitize_carriers(n, snakemake.config)
+    sanitize_carriers(n, snakemake.config)
+    sanitize_locations(n)
 
     n.export_to_netcdf(snakemake.output[0])

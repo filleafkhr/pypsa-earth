@@ -25,6 +25,8 @@ from _helpers import (
     override_component_attrs,
     prepare_costs,
     safe_divide,
+    sanitize_carriers,
+    sanitize_locations,
     three_2_two_digits_country,
     two_2_three_digits_country,
 )
@@ -715,11 +717,14 @@ def add_biomass(n, costs):
     frac = max(0.0, min(1.0, float(frac)))
     biomass_pot *= frac
     biogas_pot  *= frac
+    print("biomass and biogas potentials after applying bio_pathway fraction for investment year {0}:".format(investment_year))
+    print(biomass_pot, biogas_pot)
 
 
     # 2. Distribute equally across nodes
     biomass_pot_spatial = biomass_pot / len(spatial.biomass.nodes)
     biogas_pot_spatial  = biogas_pot / len(spatial.gas.biogas)
+    
 
     # 3. Add carriers
     n.add("Carrier", "biogas")
@@ -730,27 +735,52 @@ def add_biomass(n, costs):
     n.madd("Bus", spatial.biomass.nodes, location=spatial.biomass.locations, carrier="solid biomass")
 
     # 5. Add stores (annual stock, non-cyclic fuel tank)
-    n.madd(
-        "Store",
-        spatial.gas.biogas,
-        bus=spatial.gas.biogas,
-        carrier="biogas",
-        e_nom=biogas_pot_spatial,
-        marginal_cost=costs.at["biogas", "fuel"],
-        e_initial=biogas_pot_spatial,
-        e_cyclic=False
-    )
+    # --- ensure potentials are per-node (so sum across nodes = total) ---
+
+    def as_nodal_energy(total_or_series, nodes):
+        # returns a pd.Series indexed by nodes
+        if isinstance(total_or_series, (pd.Series, pd.DataFrame)):
+            s = pd.Series(total_or_series).reindex(nodes).fillna(0.0)
+            return s
+        # scalar total -> split across nodes (equal share)
+        total = float(total_or_series)
+        if len(nodes) == 0:
+            return pd.Series(dtype=float)
+        return pd.Series(total / len(nodes), index=nodes)
+
+    # solid biomass nodal e_nom (MWh/a per node)
+    biomass_e_nom = as_nodal_energy(biomass_pot_spatial, spatial.biomass.nodes)
 
     n.madd(
         "Store",
         spatial.biomass.nodes,
         bus=spatial.biomass.nodes,
         carrier="solid biomass",
-        e_nom=biomass_pot_spatial,
+        e_nom=biomass_e_nom,
         marginal_cost=costs.at["solid biomass", "fuel"],
-        e_initial=biomass_pot_spatial,
-        e_cyclic=False
+        e_initial=biomass_e_nom,
+        e_cyclic=False,
     )
+    n.stores.loc[n.stores.carrier == "solid biomass", "e_min_pu"] = 0.0
+
+    # biogas nodal e_nom (same idea)
+    biogas_e_nom = as_nodal_energy(biogas_pot_spatial, spatial.gas.biogas)
+
+    n.madd(
+        "Store",
+        spatial.gas.biogas,
+        bus=spatial.gas.biogas,
+        carrier="biogas",
+        e_nom=biogas_e_nom,
+        marginal_cost=costs.at["biogas", "fuel"],
+        e_initial=biogas_e_nom,
+        e_cyclic=False,
+    )
+    n.stores.loc[n.stores.carrier == "biogas", "e_min_pu"] = 0.0
+
+    print("CHECK total solid biomass e_nom:", float(n.stores.loc[n.stores.carrier=="solid biomass","e_nom"].sum()))
+    print("CHECK total biogas e_nom:", float(n.stores.loc[n.stores.carrier=="biogas","e_nom"].sum()))
+
 
     # 6. Prevent negative SoC (no free biomass)
     n.stores.loc[n.stores.carrier.isin(["biogas","solid biomass"]), "e_min_pu"] = 0
@@ -758,19 +788,23 @@ def add_biomass(n, costs):
     # 7. Calculate p_nom_max for extendable capacity
     biomass_eop_eff = costs.at["biomass EOP", "efficiency"]
     p_nom_max_biomass = biomass_pot_spatial / (8760 * biomass_eop_eff) if biomass_pot > 0 else 0
+    print(f"Calculated p_nom_max for biomass EOP: {p_nom_max_biomass:.2f} MW per node based on potential and efficiency")
+    H_yr = float(n.snapshot_weightings.generators.sum())  # effective hours in your horizon
 
-    # 8. Add biomass EOP link (electricity-only)
+    # per-node max input capacity (MW_fuel) consistent with annual stock (MWh_fuel)
+    p_nom_max_biomass = (biomass_e_nom / H_yr).reindex(spatial.nodes).fillna(0.0)
+
     n.madd(
         "Link",
         spatial.nodes + " biomass EOP",
-        bus0=spatial.biomass.nodes,   # fuel input
+        bus0=spatial.biomass.nodes,   # fuel input bus per node
         bus1=spatial.nodes,           # electricity output
-        p_nom_extendable=True,
-        p_nom_max=p_nom_max_biomass,  # tie capacity to fuel availability
         carrier="biomass EOP",
-        efficiency=biomass_eop_eff,
-        capital_cost=biomass_eop_eff * costs.at["biomass EOP","fixed"],
-        marginal_cost=biomass_eop_eff * costs.at["biomass EOP","VOM"],
+        p_nom_extendable=True,
+        p_nom_max=p_nom_max_biomass,  # <-- SERIES indexed by links
+        efficiency=costs.at["biomass EOP", "efficiency"],
+        capital_cost=costs.at["biomass EOP","fixed"] * costs.at["biomass EOP","efficiency"],
+        marginal_cost=costs.at["biomass EOP","VOM"]  * costs.at["biomass EOP","efficiency"],
         lifetime=costs.at["biomass EOP","lifetime"],
     )
 
@@ -792,8 +826,7 @@ def add_biomass(n, costs):
         p_nom_extendable=True,
     )
 
-    logger.info(f"Biomass potential: {biomass_pot/1e6:.2f} TWh/a "
-                f"-> max capacity {p_nom_max_biomass:.2f} MW per node")
+    
 
     if options["biomass_transport"]:
         # TODO add biomass transport costs
@@ -1133,7 +1166,7 @@ def add_aviation(n, cost):
     )
     print('plane before sum:')
     print(airports["p_set"].sum())
-    airports["p_set"]=airports["p_set"]*factor_transport
+    airports["p_set"]=airports["p_set"]
     print('plane sum after:')
     print(airports["p_set"].sum())
     print(airports["p_set"])
@@ -1476,17 +1509,27 @@ def add_shipping(n, costs):
             suffix=" H2 for shipping",
             bus=shipping_bus,
             carrier="H2 for shipping",
-            p_set=ports["p_set"]*factor_transport,
+            p_set=ports["p_set"],
         )
 
     if shipping_hydrogen_share < 1:
         shipping_oil_share = 1 - shipping_hydrogen_share
         print(f"shipping_oil_share = {shipping_oil_share}")
         print(f"navigation_demand = {navigation_demand}")
-        print(ports["fraction"])
+        print(ports["fraction"].sum())
         ports["p_set"] = ports["fraction"].apply(
             lambda frac: shipping_oil_share * frac * navigation_demand * 1e6 / 8760
         )
+        print("pset oil shipping")
+        print(ports["p_set"].sum())
+        p_sum_MW = ports["p_set"].sum()
+        implied_TWh = p_sum_MW * 8760 / 1e6
+
+        print("sum p_set [MW]:", p_sum_MW)
+        print("implied energy [TWh/a]:", implied_TWh)
+        print("target energy [TWh/a]:", shipping_oil_share * navigation_demand)
+        print("fraction sum:", ports["fraction"].sum())
+
 
         n.madd(
             "Load",
@@ -1494,7 +1537,7 @@ def add_shipping(n, costs):
             suffix=" shipping oil",
             bus=spatial.oil.nodes,
             carrier="shipping oil",
-            p_set=ports["p_set"]*factor_transport,
+            p_set=ports["p_set"],
         )
 
         if snakemake.config["sector"]["international_bunkers"]:
@@ -2029,6 +2072,8 @@ def add_land_transport(n, costs):
                 "Bus", spatial.oil.nodes, location=spatial.oil.locations, carrier="oil"
             )
         ice_efficiency = options["transport_internal_combustion_efficiency"]
+        print("land transport oil")
+        print(ice_share / ice_efficiency * transport[spatial.nodes])
 
         n.madd(
             "Load",
@@ -3059,8 +3104,8 @@ def add_custom_water_cost(n):
 
 
 def add_rail_transport(n, costs):
-    p_set_elec = nodal_energy_totals.loc[spatial.nodes, "electricity rail"]*factor_transport
-    p_set_oil = (nodal_energy_totals.loc[spatial.nodes, "total rail"]*factor_transport) - p_set_elec
+    p_set_elec = nodal_energy_totals.loc[spatial.nodes, "electricity rail"]
+    p_set_oil = (nodal_energy_totals.loc[spatial.nodes, "total rail"]) - p_set_elec
     n.madd(
         "Load",
         spatial.nodes,
@@ -3516,6 +3561,9 @@ if __name__ == "__main__":
             df.loc[mask, "p_nom_min"] = np.maximum(df.loc[mask, "p_nom_min"].fillna(0), df.loc[mask, "p_nom"])
             # ensure they can still grow
             df.loc[mask, "p_nom_max"] = np.inf
+    
+    sanitize_carriers(n, snakemake.config)
+    sanitize_locations(n)
 
     n.export_to_netcdf(snakemake.output[0])
 

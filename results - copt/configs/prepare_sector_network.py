@@ -715,11 +715,14 @@ def add_biomass(n, costs):
     frac = max(0.0, min(1.0, float(frac)))
     biomass_pot *= frac
     biogas_pot  *= frac
+    print("biomass and biogas potentials after applying bio_pathway fraction for investment year {0}:".format(investment_year))
+    print(biomass_pot, biogas_pot)
 
 
     # 2. Distribute equally across nodes
     biomass_pot_spatial = biomass_pot / len(spatial.biomass.nodes)
     biogas_pot_spatial  = biogas_pot / len(spatial.gas.biogas)
+    
 
     # 3. Add carriers
     n.add("Carrier", "biogas")
@@ -758,6 +761,7 @@ def add_biomass(n, costs):
     # 7. Calculate p_nom_max for extendable capacity
     biomass_eop_eff = costs.at["biomass EOP", "efficiency"]
     p_nom_max_biomass = biomass_pot_spatial / (8760 * biomass_eop_eff) if biomass_pot > 0 else 0
+    print(f"Calculated p_nom_max for biomass EOP: {p_nom_max_biomass:.2f} MW per node based on potential and efficiency")
 
     # 8. Add biomass EOP link (electricity-only)
     n.madd(

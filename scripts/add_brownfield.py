@@ -14,8 +14,9 @@ import pypsa
 import xarray as xr
 from add_existing_baseyear import (
     add_build_year_to_new_assets,
-    filter_transmission_project_build_year,
+    filter_transmission_project_build_year,lock_oil_electricity_assets
 )
+from _helpers import sanitize_carriers, sanitize_locations
 
 # from pypsa.clustering.spatial import normed_or_uniform
 
@@ -563,31 +564,40 @@ def continuity_merge_after_brownfield(
     *,
     merge_generators=True,
     merge_links=True,
-    # key definitions for “same physical asset”
     gen_key_cols=("carrier", "bus"),
     link_key_cols=("carrier", "bus0", "bus1"),
-    # optional filters (leave as None to do all carriers)
-    generator_carriers=None,  # e.g. ["solar","onwind","offwind-ac","offwind-dc","OCGT","CCGT"]
-    link_carriers=None,       # e.g. ["OCGT","CCGT","coal","lignite","H2 pipeline"]
-    set_nom_max_inf=True,
+    generator_carriers=None,   # optional whitelist (case-insensitive)
+    link_carriers=None,        # optional whitelist (case-insensitive)
+    set_min_to="p_nom",        # "p_nom" or "max(p_nom_min,p_nom)"
     verbose=True,
 ):
     """
-    Generic continuity merge to avoid year-suffixed duplicates.
+    Continuity merge AFTER brownfield import.
 
-    Idea:
-      - template assets (build_year == year) are potential “new copies”
-      - inherited assets (build_year < year) are what you carried over
-      - if both represent the same physical thing (same key), drop template
-      - then make inherited expandable and set p_nom_min = p_nom
+    Goals:
+      1) Remove year-template duplicates that represent the same physical asset:
+         - Generators: key=(carrier,bus)
+         - Links:      key=(carrier,bus0,bus1)
+         template := build_year == year
+         inherited := build_year < year
 
-    Works for:
-      - Generators: key=(carrier,bus)
-      - Links:      key=(carrier,bus0,bus1)   (minimal to avoid bus2/bus3 headaches)
+      2) Enforce continuity for inherited assets ONLY:
+         - set p_nom_min to carry previous-year capacity floor
+         - DO NOT change p_nom_extendable / p_nom_max / costs / efficiencies.
+
+    This avoids the 'oil/ror unlocked' problem: no asset is made extendable here.
     """
 
-    def _norm(s):
-        return s.astype(str).str.strip().str.lower()
+    def _norm(x):
+        return x.astype(str).str.strip().str.lower()
+
+    def _norm_set(vals):
+        if vals is None:
+            return None
+        return {str(v).strip().lower() for v in vals}
+
+    gen_whitelist = _norm_set(generator_carriers)
+    link_whitelist = _norm_set(link_carriers)
 
     def _make_key(df, cols):
         cols = [c for c in cols if c in df.columns]
@@ -599,26 +609,46 @@ def continuity_merge_after_brownfield(
                 tmp[c] = tmp[c].fillna("").astype(str)
         return pd.Series(list(map(tuple, tmp.values)), index=df.index)
 
-    out = {"gen_dropped": 0, "gen_made_extendable": 0,
-           "link_dropped": 0, "link_made_extendable": 0}
+    def _apply_min_floor(df, idx):
+        if idx.empty:
+            return 0
+        if "p_nom" not in df.columns or "p_nom_min" not in df.columns:
+            return 0
 
-    # ---------- GENERATORS ----------
-    if merge_generators and (not n.generators.empty):
+        if set_min_to == "p_nom":
+            df.loc[idx, "p_nom_min"] = df.loc[idx, "p_nom"]
+        elif set_min_to == "max(p_nom_min,p_nom)":
+            df.loc[idx, "p_nom_min"] = np.maximum(df.loc[idx, "p_nom_min"], df.loc[idx, "p_nom"])
+        else:
+            raise ValueError("set_min_to must be 'p_nom' or 'max(p_nom_min,p_nom)'")
+        return int(len(idx))
+
+    out = {
+        "gen_dropped": 0,
+        "gen_min_set": 0,
+        "link_dropped": 0,
+        "link_min_set": 0,
+    }
+
+    # ---------------- GENERATORS ----------------
+    if merge_generators and not n.generators.empty:
         G = n.generators
-        if "build_year" not in G.columns:
-            raise RuntimeError("n.generators has no build_year (call add_build_year_to_new_assets before brownfield).")
-        if "carrier" not in G.columns or "bus" not in G.columns:
-            if verbose: print("[merge] generators missing carrier/bus, skipping")
+
+        required = {"build_year", "carrier", "bus"}
+        if not required.issubset(G.columns):
+            if verbose:
+                print(f"[continuity_merge] generators missing {required - set(G.columns)}, skipping generators")
         else:
             mask = pd.Series(True, index=G.index)
-            if generator_carriers is not None:
-                mask &= _norm(G["carrier"]).isin({_norm(pd.Series(generator_carriers)).iloc[i]
-                                                 for i in range(len(generator_carriers))})
+
+            if gen_whitelist is not None:
+                mask &= _norm(G["carrier"]).isin(gen_whitelist)
 
             gen = G.loc[mask]
-            inherited = gen.index[gen.build_year < year]
-            template  = gen.index[gen.build_year == year]
+            inherited = gen.index[gen["build_year"] < year]
+            template  = gen.index[gen["build_year"] == year]
 
+            # drop template duplicates (same physical key as any inherited)
             if len(inherited) and len(template):
                 key_inh = set(_make_key(G.loc[inherited], gen_key_cols).values)
                 key_tpl = _make_key(G.loc[template], gen_key_cols)
@@ -627,35 +657,33 @@ def continuity_merge_after_brownfield(
                     n.mremove("Generator", to_drop)
                     out["gen_dropped"] = int(len(to_drop))
 
-            # re-fetch after potential removals
+            # re-fetch after removals
             G = n.generators
-            if len(inherited):
-                m = G.index.isin(inherited)
-                if m.any():
-                    # make inherited expandable and “carry” capacity as minimum
-                    if "p_nom" in G.columns:
-                        G.loc[m, "p_nom_min"] = G.loc[m, "p_nom"]
-                    G.loc[m, "p_nom_extendable"] = True
-                    if set_nom_max_inf and ("p_nom_max" in G.columns):
-                        G.loc[m, "p_nom_max"] = np.inf
-                    out["gen_made_extendable"] = int(m.sum())
 
-    # ---------- LINKS ----------
-    if merge_links and (not n.links.empty):
+            # IMPORTANT: recompute inherited index against updated table
+            # (some inherited might have been removed upstream)
+            inherited = G.index[(G["build_year"] < year)]
+            if gen_whitelist is not None:
+                inherited = inherited[_norm(G.loc[inherited, "carrier"]).isin(gen_whitelist)]
+
+            out["gen_min_set"] = _apply_min_floor(G, inherited)
+
+    # ---------------- LINKS ----------------
+    if merge_links and not n.links.empty:
         L = n.links
-        if "build_year" not in L.columns:
-            raise RuntimeError("n.links has no build_year (call add_build_year_to_new_assets before brownfield).")
-        if "carrier" not in L.columns or "bus0" not in L.columns or "bus1" not in L.columns:
-            if verbose: print("[merge] links missing carrier/bus0/bus1, skipping")
+
+        required = {"build_year", "carrier", "bus0", "bus1"}
+        if not required.issubset(L.columns):
+            if verbose:
+                print(f"[continuity_merge] links missing {required - set(L.columns)}, skipping links")
         else:
             mask = pd.Series(True, index=L.index)
-            if link_carriers is not None:
-                mask &= _norm(L["carrier"]).isin({_norm(pd.Series(link_carriers)).iloc[i]
-                                                 for i in range(len(link_carriers))})
+            if link_whitelist is not None:
+                mask &= _norm(L["carrier"]).isin(link_whitelist)
 
             links = L.loc[mask]
-            inherited = links.index[links.build_year < year]
-            template  = links.index[links.build_year == year]
+            inherited = links.index[links["build_year"] < year]
+            template  = links.index[links["build_year"] == year]
 
             if len(inherited) and len(template):
                 key_inh = set(_make_key(L.loc[inherited], link_key_cols).values)
@@ -665,26 +693,150 @@ def continuity_merge_after_brownfield(
                     n.mremove("Link", to_drop)
                     out["link_dropped"] = int(len(to_drop))
 
-            # re-fetch after potential removals
+            # re-fetch after removals
             L = n.links
-            if len(inherited):
-                m = L.index.isin(inherited)
-                if m.any():
-                    if "p_nom" in L.columns:
-                        L.loc[m, "p_nom_min"] = L.loc[m, "p_nom"]
-                    L.loc[m, "p_nom_extendable"] = True
-                    if set_nom_max_inf and ("p_nom_max" in L.columns):
-                        L.loc[m, "p_nom_max"] = np.inf
-                    out["link_made_extendable"] = int(m.sum())
+
+            inherited = L.index[(L["build_year"] < year)]
+            if link_whitelist is not None:
+                inherited = inherited[_norm(L.loc[inherited, "carrier"]).isin(link_whitelist)]
+
+            out["link_min_set"] = _apply_min_floor(L, inherited)
 
     if verbose:
         print(
             f"[continuity_merge] year={year} | "
-            f"gen: dropped={out['gen_dropped']}, made_extendable={out['gen_made_extendable']} | "
-            f"link: dropped={out['link_dropped']}, made_extendable={out['link_made_extendable']}"
+            f"gen: dropped={out['gen_dropped']}, p_nom_min_set={out['gen_min_set']} | "
+            f"link: dropped={out['link_dropped']}, p_nom_min_set={out['link_min_set']}"
         )
 
     return out
+
+
+def _norm_series(s):
+    return s.astype(str).str.strip().str.lower()
+
+def audit_after_continuity_merge(n, year, carriers=("oil", "ror", "run-of-river", "run of river")):
+    """
+    Prints:
+      - summary by carrier (counts, p_nom sums, p_nom_min sums, extendable share)
+      - template-vs-inherited duplicate keys that SURVIVED
+      - inherited duplicates among themselves
+    """
+    carriers_norm = {c.strip().lower() for c in carriers}
+
+    def _make_key(df, cols):
+        cols = [c for c in cols if c in df.columns]
+        tmp = df.loc[:, cols].copy()
+        if "carrier" in cols:
+            tmp["carrier"] = _norm_series(tmp["carrier"])
+        for c in cols:
+            if c != "carrier":
+                tmp[c] = tmp[c].fillna("").astype(str)
+        return pd.Series(list(map(tuple, tmp.values)), index=df.index)
+
+    # ----------------- GENERATORS -----------------
+    if not n.generators.empty and {"carrier","bus","build_year"}.issubset(n.generators.columns):
+        G = n.generators.copy()
+        G["carrier_norm"] = _norm_series(G["carrier"])
+
+        # keep anything whose carrier contains "oil" or "ror" etc (substring helps catch "run-of-river")
+        mask = G["carrier_norm"].apply(lambda x: any(k in x for k in carriers_norm))
+        g = G.loc[mask].copy()
+
+        print("\n=== generators: oil/ror audit ===")
+        if g.empty:
+            print("no matching generator carriers found")
+        else:
+            # summary by carrier
+            def _colsum(df, col):
+                return df[col].sum() if col in df.columns else np.nan
+
+            summ = (g.groupby("carrier_norm")
+                      .apply(lambda df: pd.Series({
+                          "n": len(df),
+                          "sum_p_nom": _colsum(df, "p_nom"),
+                          "sum_p_nom_min": _colsum(df, "p_nom_min"),
+                          "share_extendable": float(df["p_nom_extendable"].mean()) if "p_nom_extendable" in df else np.nan,
+                          "min_build_year": df["build_year"].min(),
+                          "max_build_year": df["build_year"].max(),
+                      }))
+                      .sort_values("sum_p_nom", ascending=False))
+            print(summ)
+
+            # template-vs-inherited duplicates that survived
+            key = _make_key(g, ("carrier", "bus"))
+            inh = g.index[g["build_year"] < year]
+            tpl = g.index[g["build_year"] == year]
+            if len(inh) and len(tpl):
+                key_inh = set(key.loc[inh].values)
+                surv_tpl = key.loc[tpl]
+                survived = surv_tpl.index[surv_tpl.isin(key_inh)]
+                print(f"\n[generators] template duplicates surviving merge: {len(survived)}")
+                if len(survived):
+                    show = g.loc[survived, ["carrier","bus","build_year","p_nom","p_nom_min","p_nom_extendable"]].copy()
+                    print(show.sort_values(["carrier","bus"]).head(40))
+
+            # inherited duplicates among themselves (merge won't fix these)
+            if len(inh):
+                inh_key = key.loc[inh]
+                dup_inh = inh_key[inh_key.duplicated(keep=False)]
+                print(f"[generators] inherited duplicates among themselves: {dup_inh.index.nunique()}")
+                if not dup_inh.empty:
+                    show = g.loc[dup_inh.index, ["carrier","bus","build_year","p_nom","p_nom_min","p_nom_extendable"]]
+                    print(show.sort_values(["carrier","bus","build_year"]).head(60))
+
+    else:
+        print("\n=== generators: skipped (missing columns carrier/bus/build_year or empty) ===")
+
+    # ----------------- LINKS (oil sometimes is here as conversion tech) -----------------
+    if not n.links.empty and {"carrier","bus0","bus1","build_year"}.issubset(n.links.columns):
+        L = n.links.copy()
+        L["carrier_norm"] = _norm_series(L["carrier"])
+
+        mask = L["carrier_norm"].apply(lambda x: any(k in x for k in carriers_norm))
+        l = L.loc[mask].copy()
+
+        print("\n=== links: oil/ror audit ===")
+        if l.empty:
+            print("no matching link carriers found")
+        else:
+            def _colsum(df, col):
+                return df[col].sum() if col in df.columns else np.nan
+
+            summ = (l.groupby("carrier_norm")
+                      .apply(lambda df: pd.Series({
+                          "n": len(df),
+                          "sum_p_nom": _colsum(df, "p_nom"),
+                          "sum_p_nom_min": _colsum(df, "p_nom_min"),
+                          "share_extendable": float(df["p_nom_extendable"].mean()) if "p_nom_extendable" in df else np.nan,
+                          "min_build_year": df["build_year"].min(),
+                          "max_build_year": df["build_year"].max(),
+                      }))
+                      .sort_values("sum_p_nom", ascending=False))
+            print(summ)
+
+            key = _make_key(l, ("carrier", "bus0", "bus1"))
+            inh = l.index[l["build_year"] < year]
+            tpl = l.index[l["build_year"] == year]
+            if len(inh) and len(tpl):
+                key_inh = set(key.loc[inh].values)
+                surv_tpl = key.loc[tpl]
+                survived = surv_tpl.index[surv_tpl.isin(key_inh)]
+                print(f"\n[links] template duplicates surviving merge: {len(survived)}")
+                if len(survived):
+                    show = l.loc[survived, ["carrier","bus0","bus1","build_year","p_nom","p_nom_min","p_nom_extendable"]].copy()
+                    print(show.sort_values(["carrier","bus0","bus1"]).head(40))
+
+            if len(inh):
+                inh_key = key.loc[inh]
+                dup_inh = inh_key[inh_key.duplicated(keep=False)]
+                print(f"[links] inherited duplicates among themselves: {dup_inh.index.nunique()}")
+                if not dup_inh.empty:
+                    show = l.loc[dup_inh.index, ["carrier","bus0","bus1","build_year","p_nom","p_nom_min","p_nom_extendable"]]
+                    print(show.sort_values(["carrier","bus0","bus1","build_year"]).head(60))
+
+    else:
+        print("\n=== links: skipped (missing columns carrier/bus0/bus1/build_year or empty) ===")
 
 
 
@@ -719,6 +871,9 @@ if __name__ == "__main__":
 
     n_p = pypsa.Network(snakemake.input.network_p)
     add_brownfield(n, n_p, year)
+    lock_oil_electricity_assets(n) 
+    continuity_merge_after_brownfield(n,year)
+    audit_after_continuity_merge(n, year, carriers=("oil","ror","run-of-river","run of river","hydro ror"))
 
     disable_grid_expansion_if_limit_hit(n)
     elec_cfg = snakemake.config.get("electricity", {})

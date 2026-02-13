@@ -61,7 +61,7 @@ RESDIR = config["results_dir"].strip("/") + f"/{SECDIR}"
 load_data_paths = get_load_paths_gegis("data", config)
 
 if config["enable"].get("retrieve_cost_data", True):
-    COSTS = "resources/" + RDIR + f"costs_{config['costs']['year']}_fin.csv"
+    COSTS = "resources/" + RDIR + f"costs_{config['costs']['year']}.csv"
 else:
     COSTS = "data/costs.csv"
 ATLITE_NPROCESSES = config["atlite"].get("nprocesses", 4)
@@ -509,21 +509,36 @@ if not config["enable"].get("build_natura_raster", False):
             import shutil
 
             shutil.copyfile(input[0], output[0])
-
+    
+country_data = config["costs"].get("country_specific_data", "")
+countries = config.get("countries", [])
+if country_data and countries == [country_data]:
+    cost_directory = f"{country_data}/"
+elif country_data:
+    cost_directory = f"{country_data}/"
+    warnings.warn(
+        f"'country_specific_data' is set to '{country_data}', but 'countries' is {countries}. Make sure the '{country_data}' directory exists and that this is intentional."
+    )
+else:
+    cost_directory = ""
 
 if config["enable"].get("retrieve_cost_data", True):
 
     rule retrieve_cost_data:
         params:
-            version=config["costs"]["version"],
+            version=config["costs"]["technology_data_version"],
         input:
             HTTP.remote(
-                f"raw.githubusercontent.com/PyPSA/technology-data/{config['costs']['version']}/outputs/"
+                f"raw.githubusercontent.com/PyPSA/technology-data/{config['costs']['technology_data_version']}/outputs/{cost_directory}"
                 + "costs_{year}.csv",
                 keep_local=True,
             ),
         output:
-            "resources/" + RDIR + "costs_{year}.csv",
+            branch(
+                config["costs"].get("append_cost_data"),
+                "resources/" + RDIR + "pre_costs_{year}.csv",
+                "resources/" + RDIR + "costs_{year}.csv",
+            ),
         log:
             "logs/" + RDIR + "retrieve_cost_data_{year}.log",
         resources:
@@ -534,14 +549,14 @@ if config["enable"].get("retrieve_cost_data", True):
     rule append_cost_data:
         params:
             discount_rate=config["costs"]["discountrate"],
-            regional_factor=config["costs"]["regional_factor"],
+            regional_factor=config["costs"].get("regional_factor"),
         input:
-            costs="resources/" + RDIR + "costs_{year}.csv",
+            costs="resources/" + RDIR + "pre_costs_{year}.csv",
             app_costs="data/AEO8-input/AEO8_Table_D15_Cost_Summary.csv",
             declining_factor="data/AEO8-input/AEO8_Table_D17_Declining_Factor.csv",
             regional_factor="data/AEO8-input/AEO8_Table_D18_Regional_Factor.csv",
         output:
-            "resources/" + RDIR + "costs_{year}_fin.csv",
+            "resources/" + RDIR + "costs_{year}.csv",
         log:
             "logs/" + RDIR + "append_cost_data_{year}.log",
         resources:
@@ -1216,7 +1231,8 @@ rule prepare_transport_data_input:
         "scripts/prepare_transport_data_input.py"
 
 
-if not config["custom_data"]["gas_network"]:
+if config["enable"].get("gas", False) and not config["custom_data"]["gas_network"]:
+
 
     rule prepare_gas_network:
         params:

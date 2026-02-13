@@ -91,7 +91,7 @@ import pandas as pd
 import powerplantmatching as pm
 import pypsa
 import xarray as xr
-from _helpers import configure_logging, create_logger, read_csv_nafix, update_p_nom_max
+from _helpers import configure_logging, create_logger, read_csv_nafix, update_p_nom_max, sanitize_carriers,sanitize_locations
 from powerplantmatching.export import map_country_bus
 
 idx = pd.IndexSlice
@@ -952,6 +952,8 @@ if __name__ == "__main__":
         print(n.storage_units.groupby("carrier")["p_nom"].sum() / 1e3)
     else:
         print("no storage units")
-
+    sanitize_carriers(n, snakemake.config)
+    if "location" in n.buses:
+        sanitize_locations(n)
     n.meta = snakemake.config
     n.export_to_netcdf(snakemake.output[0])

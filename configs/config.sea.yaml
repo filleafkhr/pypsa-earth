@@ -224,7 +224,7 @@ sector:
     ASEAN_2040: 0.12
     ASEAN_2045: 0.16
     ASEAN_2050: 0.20 # in transport share 
-  co2_network: false 
+  #co2_network: t 
   biomass_transport: false
   solid_biomass_potential: 1089 # TWh/a, biomass residues 
   biogas_potential: 43.56 # TWh/a, only from lifestock manure (4% of total residue)
@@ -246,6 +246,7 @@ sector:
   SMR CC: false
   v2g: false
   chp: false
+  transport_internal_combustion_efficiency: 1 #Demand scaled to energy values
   lignite:
     spatial_lignite: true
 
