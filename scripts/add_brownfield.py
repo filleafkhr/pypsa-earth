@@ -880,6 +880,8 @@ if __name__ == "__main__":
     apply_coal_supplier_phaseout(n, year, elec_cfg, verbose=True)
     apply_gas_trade_adjustments(n, snakemake.config)
     apply_storage_country_rules(n, snakemake.config)
+    sanitize_carriers(n, snakemake.config)
+    sanitize_locations(n)
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])

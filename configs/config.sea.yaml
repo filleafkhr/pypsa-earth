@@ -13,7 +13,7 @@ enable:
   download_osm_data: false 
   build_natura_raster: false 
   build_cutout: false
-  renewable_profiles: true 
+  renewable_profiles: false 
 
 scenario:
   ll: ["copt"] 
@@ -21,9 +21,9 @@ scenario:
   planning_horizons: 
   - 2030
   #- 2035
-  - 2040
+  #- 2040
   #- 2045  
-  - 2050  
+  #- 2050  
   demand: 
   - "ASEAN"
   opts: [Co2L-3h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
@@ -50,19 +50,13 @@ subregion:
     ID_Nusa-Tenggara: [ID.20_1, ID.21_1]
     ID_Papua: [ID.22_1, ID.23_1]
     ID_Sulawesi: [ID.6_1, ID.25_1, ID.26_1, ID.27_1, ID.28_1, ID.29_1]
-    ID_Sumatra: [ID.1_1, ID.3_1, ID.5_1, ID.8_1, ID.16_1, ID.17_1, ID.24_1, ID.30_1, ID.31_1, ID.32_1,]
+    ID_Sumatra: [ID.1_1, ID.3_1, ID.5_1, ID.8_1, ID.16_1, ID.17_1, ID.24_1, ID.30_1, ID.31_1, ID.32_1]
     MY_Peninsular: [MY.1_1, MY.2_1, MY.3_1, MY.4_1, MY.6_1, MY.7_1, MY.8_1, MY.9_1, MY.10_1, MY.11_1, MY.12_1, MY.15_1, MY.16_1]
     MY_Sabah: [MY.5_1, MY.13_1]
     MY_Sarawak: [MY.14_1]
-    PH_Luzon: [
-      PH.1_1, PH.5_1, PH.7_1, PH.8_1, PH.10_1, PH.11_1, PH.12_1, PH.13_1, PH.17_1, PH.18_1, PH.19_1, PH.20_1, PH.23_1, 
-      PH.24_1, PH.33_1, PH.34_1, PH.35_1, PH.37_1, H.38_1, PH.39_1, PH.40_1, PH.45_1, PH.46_1, PH.47_1, PH.50_1, PH.55_1, 
-      PH.56_1, PH.57_1, PH.58_1, PH.59_1, PH.60_1, PH.61_1, PH.62_1, PH.63_1, PH.64_1, PH.65_1, PH.69_1, PH.76_1, PH.78_1]
-    PH_Visayas: [
-      PH.4_1, PH.6_1, PH.14_1, PH.15_1, PH.22_1, PH.25_1, PH.31_1, PH.32_1, PH.36_1, PH.43_1, PH.51_1, PH.52_1, PH.54_1, PH.66_1, PH.68_1, PH.71_1]
-    PH_Mindanao: [
-      PH.2_1, PH.3_1, PH.9_1, PH.16_1, PH.21_1, PH.26_1, PH.27_1, PH.28_1, PH.29_1, PH.30_1, PH.41_1, PH.42_1, PH.44_1, 
-      PH.48_1, PH.49_1, PH.53_1, PH.67_1, PH.70_1, PH.72_1, PH.73_1, PH.74_1, PH.75_1, PH.77_1, PH.79_1, PH.80_1, PH.81_1]
+    PH_Luzon: [PH.1_1, PH.5_1, PH.7_1, PH.8_1, PH.10_1, PH.11_1, PH.12_1, PH.13_1, PH.17_1, PH.18_1, PH.19_1, PH.20_1, PH.23_1, PH.24_1, PH.33_1, PH.34_1, PH.35_1, PH.37_1, H.38_1, PH.39_1, PH.40_1, PH.45_1, PH.46_1, PH.47_1, PH.50_1, PH.55_1, PH.56_1, PH.57_1, PH.58_1, PH.59_1, PH.60_1, PH.61_1, PH.62_1, PH.63_1, PH.64_1, PH.65_1, PH.69_1, PH.76_1, PH.78_1]
+    PH_Visayas: [PH.4_1, PH.6_1, PH.14_1, PH.15_1, PH.22_1, PH.25_1, PH.31_1, PH.32_1, PH.36_1, PH.43_1, PH.51_1, PH.52_1, PH.54_1, PH.66_1, PH.68_1, PH.71_1]
+    PH_Mindanao: [PH.2_1, PH.3_1, PH.9_1, PH.16_1, PH.21_1, PH.26_1, PH.27_1, PH.28_1, PH.29_1, PH.30_1, PH.41_1, PH.42_1, PH.44_1, PH.48_1, PH.49_1, PH.53_1, PH.67_1, PH.70_1, PH.72_1, PH.73_1, PH.74_1, PH.75_1, PH.77_1, PH.79_1, PH.80_1, PH.81_1]
 
 
 load_options: 
@@ -132,11 +126,11 @@ load_options:
       2045: 0
       2050: 0
     transport: #AEO8 BAS
-      2030: 2344608000
-      2035: 2795852000 
-      2040: 3266424000
-      2045: 3793143000
-      2050: 4357987000
+      2030: 0 #2344608000
+      2035: 0 #2795852000 
+      2040: 0
+      2045: 0
+      2050: 0
     services: #AEO8 BAS
       2030: 458222000
       2035: 544284000
@@ -224,7 +218,7 @@ sector:
     ASEAN_2040: 0.12
     ASEAN_2045: 0.16
     ASEAN_2050: 0.20 # in transport share 
-  #co2_network: t 
+  co2_network: false
   biomass_transport: false
   solid_biomass_potential: 1089 # TWh/a, biomass residues 
   biogas_potential: 43.56 # TWh/a, only from lifestock manure (4% of total residue)
@@ -250,18 +244,27 @@ sector:
   lignite:
     spatial_lignite: true
 
-
-focus_weights: # Focus weights based on land area
-  BN: 0.001244
-  KH: 0.041030
-  ID: 0.404900
-  LA: 0.055035
-  MY: 0.070880
-  MM: 0.165034
-  PH: 0.065376
-  SG: 0.000128
-  TH: 0.118773
-  VN: 0.077600
+focus_weights:
+  BN: 0.0
+  KH: 0.046396
+  LA: 0.058770
+  MM: 0.169951
+  SG: 0.0
+  TH: 0.131035
+  VN: 0.084013
+  ID_Java-Bali: 0.035281
+  ID_Kalimantan: 0.135732
+  ID_Maluku: 0.0
+  ID_Nusa-Tenggara: 0.016782
+  ID_Papua: 0.0
+  ID_Sulawesi: 0.046963
+  ID_Sumatra: 0.120713
+  MY_Peninsular: 0.033556
+  MY_Sarawak: 0.031638
+  MY_Sabah: 0.018709
+  PH_Luzon: 0.023487
+  PH_Visayas: 0.023487
+  PH_Mindanao: 0.023487
 
 transmission_projects:
   enable: true

@@ -233,7 +233,9 @@ def _compute_connection_costs_to_bus(
     return connection_costs_to_bus
 
 
-def _adjust_capital_costs_using_connection_costs(n, connection_costs_to_bus, output):
+def _adjust_capital_costs_using_connection_costs(
+    n, connection_costs_to_bus, output, currency
+):
     connection_costs = {}
     for tech in connection_costs_to_bus:
         tech_b = n.generators.carrier == tech
@@ -248,7 +250,7 @@ def _adjust_capital_costs_using_connection_costs(n, connection_costs_to_bus, out
                 "Displacing {} generator(s) and adding connection costs to capital_costs: {} ".format(
                     tech,
                     ", ".join(
-                        "{:.0f} Eur/MW/a for `{}`".format(d, b)
+                        "{:.0f} {}/MW/a for `{}`".format(d, currency, b)
                         for b, d in costs.items()
                     ),
                 )
@@ -274,7 +276,12 @@ def _aggregate_and_move_components(
             if not df.empty:
                 import_series_from_dataframe(n, df, c, attr)
 
-    _adjust_capital_costs_using_connection_costs(n, connection_costs_to_bus, output)
+    _adjust_capital_costs_using_connection_costs(
+        n,
+        connection_costs_to_bus,
+        snakemake.output,
+        snakemake.params.costs["output_currency"],
+    )
 
     generator_strategies = aggregation_strategies["generators"]
 
@@ -676,9 +683,9 @@ def cluster(
     return clustering.network, clustering.busmap
 
 
-def drop_isolated_nodes(n, threshold):
+def drop_isolated_networks(n, threshold):
     """
-    Find isolated nodes in the network and drop those of them which don't have
+    Find isolated subnetworks in the network and drop those of them which don't have
     load or have a load value lower than a threshold.
 
     Parameters
@@ -700,10 +707,15 @@ def drop_isolated_nodes(n, threshold):
     load_mean_origin = n.loads_t.p_set.mean().mean()
 
     # duplicated sub-networks mean that there is at least one interconnection between buses
+    p_by_node = n.loads_t.p_set.mean().reindex(n.buses.index, fill_value=0.0)
+    p_by_sub = p_by_node.groupby(p_by_node.index.map(n.buses.sub_network)).sum()
+
+    small_subs = p_by_sub[p_by_sub < threshold].index
+
     off_buses = n.buses[
-        (~n.buses.duplicated(subset=["sub_network"], keep=False))
-        & (n.buses.carrier == "AC")
+        (n.buses.carrier == "AC") & n.buses.sub_network.isin(small_subs)
     ]
+
     i_islands = off_buses.index
 
     if off_buses.empty:
@@ -717,27 +729,20 @@ def drop_isolated_nodes(n, threshold):
         if n_bus_off == n_bus:
             i_islands = i_islands[i_islands != off_buses[isc_offbus].index[0]]
 
-    i_load_islands = n.loads_t.p_set.columns.intersection(i_islands)
+    i_loads_drop = n.loads[n.loads.bus.isin(i_islands)].index
+    i_generators_drop = n.generators[n.generators.bus.isin(i_islands)].index
+    i_links_drop = n.links[
+        n.links.bus0.isin(i_islands) | n.links.bus1.isin(i_islands)
+    ].index
+    i_lines_drop = n.lines[
+        n.lines.bus0.isin(i_islands) | n.lines.bus1.isin(i_islands)
+    ].index
 
-    # isolated buses without load should be discarded
-    isl_no_load = i_islands.difference(i_load_islands)
-
-    # isolated buses with load lower than a specified threshold should be discarded as well
-    i_small_load = i_load_islands[
-        n.loads_t.p_set[i_load_islands].mean(axis=0) <= threshold
-    ]
-
-    if (i_islands.empty) | (len(i_small_load) == 0):
-        return n
-
-    i_to_drop = isl_no_load.to_list() + i_small_load.to_list()
-
-    i_loads_drop = n.loads[n.loads.bus.isin(i_to_drop)].index
-    i_generators_drop = n.generators[n.generators.bus.isin(i_to_drop)].index
-
-    n.mremove("Bus", i_to_drop)
+    n.mremove("Bus", i_islands)
     n.mremove("Load", i_loads_drop)
     n.mremove("Generator", i_generators_drop)
+    n.mremove("Link", i_links_drop)
+    n.mremove("Line", i_lines_drop)
 
     n.determine_network_topology()
 
@@ -745,7 +750,7 @@ def drop_isolated_nodes(n, threshold):
     generators_mean_final = n.generators.p_nom.mean()
 
     logger.info(
-        f"Dropped {len(i_to_drop)} buses. A resulted load discrepancy is {(100 * ((load_mean_final - load_mean_origin)/load_mean_origin)):2.1}% and {(100 * ((generators_mean_final - generators_mean_origin)/generators_mean_origin)):2.1}% for average load and generation capacity, respectively"
+        f"Dropped {len(i_islands)} buses. A resulted load discrepancy is {(100 * ((load_mean_final - load_mean_origin)/load_mean_origin)):2.1}% and {(100 * ((generators_mean_final - generators_mean_origin)/generators_mean_origin)):2.1}% for average load and generation capacity, respectively"
     )
 
     return n
@@ -865,7 +870,7 @@ def merge_into_network(n, threshold, aggregation_strategies=dict()):
         busmap,
         aggregate_generators_weighted=True,
         aggregate_generators_carriers=None,
-        aggregate_one_ports=["Load", "StorageUnit"],
+        # aggregate_one_ports=["Load", "StorageUnit"],  # TODO: restore when PyPSA version is updated
         line_length_factor=1.0,
         line_strategies=line_strategies,
         bus_strategies=bus_strategies,
@@ -884,9 +889,9 @@ def merge_into_network(n, threshold, aggregation_strategies=dict()):
     return clustering.network, busmap
 
 
-def merge_isolated_nodes(n, threshold, aggregation_strategies=dict()):
+def merge_isolated_networks(n, threshold, aggregation_strategies=dict()):
     """
-    Find isolated nodes in the network and merge those of them which have load
+    Find isolated subnetworks in the network and merge those of them which have load
     value below than a specified threshold into a single isolated node which
     represents all the remote generation.
 
@@ -910,17 +915,16 @@ def merge_isolated_nodes(n, threshold, aggregation_strategies=dict()):
 
     n.determine_network_topology()
 
-    # duplicated sub-networks mean that there is at least one interconnection between buses
-    i_islands = n.buses[
-        (~n.buses.duplicated(subset=["sub_network"], keep=False))
-        & (n.buses.carrier == "AC")
-    ].index
+    p_by_node = n.loads_t.p_set.mean().reindex(n.buses.index, fill_value=0.0)
+    p_by_sub = p_by_node.groupby(p_by_node.index.map(n.buses.sub_network)).sum()
 
-    # isolated buses with load below than a specified threshold should be merged
-    i_load_islands = n.loads_t.p_set.columns.intersection(i_islands)
-    i_islands_merge = i_load_islands[
-        n.loads_t.p_set[i_load_islands].mean(axis=0) <= threshold
+    small_subs = p_by_sub[p_by_sub < threshold].index
+
+    off_buses = n.buses[
+        (n.buses.carrier == "AC") & n.buses.sub_network.isin(small_subs)
     ]
+
+    i_islands_merge = off_buses.index
 
     # all the nodes to be merged should be mapped into a single node
     map_isolated_node_by_country = (
@@ -973,8 +977,6 @@ def merge_isolated_nodes(n, threshold, aggregation_strategies=dict()):
     return clustering.network, busmap
 
 
-
-
 if __name__ == "__main__":
     if "snakemake" not in globals():
         from _helpers import mock_snakemake
@@ -984,21 +986,19 @@ if __name__ == "__main__":
     configure_logging(snakemake)
 
     n = pypsa.Network(snakemake.input.network)
-    
+
     for col in ["project_status", "tags", "underground", "under_construction"]:
         if col in n.lines.columns:
             logger.info(f"Adjusting '{col}' column in lines.")
-            
+
             if col in ["project_status", "tags"]:
                 n.lines = n.lines.drop(columns=col)
-            
+
             elif col == "underground":
                 n.lines[col] = n.lines[col].replace(0, np.nan)
-            
+
             elif col == "under_construction":
                 n.lines[col] = n.lines[col].fillna(0).astype(bool)
-
-
 
     base_voltage = snakemake.params.electricity["base_voltage"]
     linetype = snakemake.params.config_lines["ac_types"][base_voltage]
@@ -1007,6 +1007,14 @@ if __name__ == "__main__":
     )
     hvdc_as_lines = snakemake.params.electricity["hvdc_as_lines"]
     aggregation_strategies = snakemake.params.aggregation_strategies
+
+    # make line clustering robust: if any merged line is under construction -> cluster is under construction
+    update_config_dictionary(
+        config_dict=aggregation_strategies,
+        parameter_key_to_fill="lines",
+        dict_to_use={"under_construction": "max"},
+    )
+
 
     # Aggregation strategies must be set for all columns
     update_config_dictionary(
@@ -1109,7 +1117,10 @@ if __name__ == "__main__":
         build_shape_options = snakemake.params.build_shape_options
         country_list = snakemake.params.countries
         distribution_cluster = snakemake.params.cluster_options["distribute_cluster"]
-        focus_weights = snakemake.params.focus_weights
+        focus_weights = (
+            snakemake.params.focus_weights
+            or snakemake.params.cluster_options["focus_weights"]
+        )
         gadm_layer_id = snakemake.params.build_shape_options["gadm_layer_id"]
         geo_crs = snakemake.params.crs["geo_crs"]
         renewable_config = snakemake.params.renewable
@@ -1181,16 +1192,15 @@ if __name__ == "__main__":
     else:
         subregion_shapes = False
 
-    p_threshold_drop_isolated = max(
-        0.0, cluster_config.get("p_threshold_drop_isolated", 0.0)
-    )
+    p_threshold_drop_isolated = cluster_config.get("p_threshold_drop_isolated", False)
     p_threshold_merge_isolated = cluster_config.get("p_threshold_merge_isolated", False)
     s_threshold_fetch_isolated = cluster_config.get("s_threshold_fetch_isolated", False)
 
-    n = drop_isolated_nodes(n, threshold=p_threshold_drop_isolated)
+    if p_threshold_drop_isolated:
+        n = drop_isolated_networks(n, threshold=p_threshold_drop_isolated)
 
     if p_threshold_merge_isolated:
-        n, merged_nodes_map = merge_isolated_nodes(
+        n, merged_nodes_map = merge_isolated_networks(
             n,
             threshold=p_threshold_merge_isolated,
             aggregation_strategies=aggregation_strategies,

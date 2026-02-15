@@ -585,8 +585,7 @@ def clustering_for_n_clusters(
                 algorithm,
                 feature,
             )
-    else:
-        busmap = custom_busmap
+    
 
     clustering = get_clustering_from_busmap(
         n,
