@@ -1,6 +1,7 @@
-# SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
+# -*- coding: utf-8 -*-
+# SPDX-FileCopyrightText: PyPSA-ASEAN, PyPSA-Earth and PyPSA-Eur Authors
 #
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
 
 """
@@ -13,7 +14,7 @@ Inputs
 - ``networks/base_network.nc``:  Base network topology for the electricity grid. This is processed in :mod:`base_network.py`.
 - ``data/transmission_projects/"project_name"/``: Takes the transmission projects from the subfolder of data/transmission_projects. The subfolder name is the project name.
 - ``offshore_shapes.geojson``: Shapefile containing the offshore regions. Used to determine if a new bus should be added for a new line or link.
-- ``ASEAN_shape.geojson``: Shapefile containing the shape of Europe. Used to determine if a project is within the considered countries.
+- ``country_shapes.geojson``: Shapefile containing the shape of countries. Used to determine if a project is within the considered countries.
 
 Outputs
 -------
@@ -28,15 +29,13 @@ Outputs
 from pathlib import Path
 
 import geopandas as gpd
-from matplotlib import lines
 import numpy as np
 import pandas as pd
 import pypsa
 import shapely
-from pypsa.descriptors import nominal_attrs
+from _helpers import configure_logging, create_logger
 from scipy import spatial
-from shapely.geometry import LineString, Point
-from _helpers import configure_logging, create_logger, read_csv_nafix
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 
 logger = create_logger(__name__)
 
@@ -78,11 +77,12 @@ def find_country_for_bus(bus, shapes):
 def connect_new_lines(
     lines,
     n,
-    new_buses_df, status,
+    new_buses_df,
+    status,
     offshore_shapes=None,
-    ASEAN_shape=None,
+    country_shapes=None,
     distance_upper_bound=np.inf,
-    bus_carrier="AC"
+    bus_carrier="AC",
 ):
     """
     Find the closest existing bus to the port of each line.
@@ -109,7 +109,7 @@ def connect_new_lines(
         if not lines_port.match_distance.all() and offshore_shapes is not None:
             potential_new_buses = lines_port[~lines_port.match_distance]
             is_offshore = potential_new_buses.apply(
-                lambda x: offshore_shapes.unary_union.contains(Point(x.x, x.y)), axis=1
+                lambda x: offshore_shapes.union_all().contains(Point(x.x, x.y)), axis=1
             )
             new_buses = potential_new_buses[is_offshore]
 
@@ -125,12 +125,11 @@ def connect_new_lines(
                 new_buses_df = pd.concat([new_buses_df, new_buses])
 
         # --- ONSHORE NEW BUSES ---
-        if not lines_port.match_distance.all() and ASEAN_shape is not None:
+        if not lines_port.match_distance.all() and country_shapes is not None:
             potential_new_buses = lines_port[~lines_port.match_distance]
 
             is_onshore = potential_new_buses.apply(
-                lambda x: ASEAN_shape.unary_union.contains(Point(x.x, x.y)),
-                axis=1
+                lambda x: country_shapes.union_all().contains(Point(x.x, x.y)), axis=1
             )
             new_buses = potential_new_buses[is_onshore]
 
@@ -138,7 +137,7 @@ def connect_new_lines(
                 new_port, new_buses = add_new_buses(n, new_buses)
 
                 new_buses["country"] = new_buses.apply(
-                    lambda bus: find_country_for_bus(bus, ASEAN_shape), axis=1
+                    lambda bus: find_country_for_bus(bus, country_shapes), axis=1
                 )
 
                 new_buses["tag_substation"] = "transmission"
@@ -149,15 +148,12 @@ def connect_new_lines(
 
                 new_buses_df = pd.concat([new_buses_df, new_buses])
 
-
         # Assign bus connections for this port
         lines.loc[lines_port.index, f"bus{port}"] = lines_port["neighbor"]
 
     lines["under_construction"] = lines["project_status"] != "existing"
 
-
     return lines, new_buses_df
-
 
 
 def get_branch_coords_from_geometry(linestring, reversed=False):
@@ -182,31 +178,22 @@ def get_branch_coords_from_geometry(linestring, reversed=False):
 
 
 def get_branch_coords_from_buses(line):
-    # DEBUG: catch the exact offender
-    b0 = str(line.bus0)
-    b1 = str(line.bus1)
+    """
+    Gets line string for branch component in an pypsa network.
 
-    # if either endpoint bus is missing -> you'll see it
-    if (b0 not in n.buses.index) or (b1 not in n.buses.index):
-        print("MISSING BUS IN BASE NETWORK:", getattr(line, "name", "<no-name>"), "bus0=", b0, "bus1=", b1)
-        # return dummy numeric coords so KDTree build doesn't crash BEFORE you see prints
-        return np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
+    Parameters
+    ----------
+    linestring: shapely linestring
+    reversed (bool, optional): If True, returns the end and start points instead of the start and end points.
+                               Defaults to False.
 
-    x0y0 = n.buses.loc[b0, ["x", "y"]]
-    x1y1 = n.buses.loc[b1, ["x", "y"]]
-
-    # if x/y are not numeric, print the exact bus rows
-    if (not np.issubdtype(type(x0y0["x"]), np.number)) or (not np.issubdtype(type(x0y0["y"]), np.number)) \
-       or (not np.issubdtype(type(x1y1["x"]), np.number)) or (not np.issubdtype(type(x1y1["y"]), np.number)):
-        print("NON-NUMERIC BUS COORDS FROM:", getattr(line, "name", "<no-name>"))
-        print("  bus0 row:", b0, x0y0.to_dict())
-        print("  bus1 row:", b1, x1y1.to_dict())
-        return np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
-
-    start_coords = x0y0.astype(float).values
-    end_coords   = x1y1.astype(float).values
+    Returns
+    -------
+    numpy.ndarray: Flattened array of start and end coordinates.
+    """
+    start_coords = n.buses.loc[line.bus0, ["x", "y"]].values
+    end_coords = n.buses.loc[line.bus1, ["x", "y"]].values
     return np.array([start_coords, end_coords]).flatten()
-
 
 
 def get_bus_coords_from_port(linestring, port=0):
@@ -244,16 +231,6 @@ def find_closest_lines(lines, new_lines, distance_upper_bound=0.1, type="new"):
     pandas.Series: Series containing with index the new lines and values providing closest existing line.
     """
 
-    # --- FIX: base network may have no links/lines to compare against ---
-    if lines is None or len(lines) == 0:
-        return pd.Series(dtype=object, name="existing_line")
-
-    # --- FIX: drop broken rows with missing endpoints (NaN bus0/bus1) ---
-    if "bus0" in lines.columns and "bus1" in lines.columns:
-        lines = lines.dropna(subset=["bus0", "bus1"])
-        if len(lines) == 0:
-            return pd.Series(dtype=object, name="existing_line")
-
     # get coordinates of start and end points of all lines, for new lines we need to check both directions
     treelines = lines.apply(get_branch_coords_from_buses, axis=1)
     querylines = pd.concat(
@@ -262,7 +239,7 @@ def find_closest_lines(lines, new_lines, distance_upper_bound=0.1, type="new"):
             new_lines["geometry"].apply(get_branch_coords_from_geometry, reversed=True),
         ]
     )
-    treelines = np.vstack(treelines).astype(float)
+    treelines = np.vstack(treelines)
     querylines = np.vstack(querylines)
     tree = spatial.KDTree(treelines)
     dist, ind = tree.query(querylines, distance_upper_bound=distance_upper_bound)
@@ -340,10 +317,9 @@ def get_upgraded_lines(branch_component, n, upgraded_lines, line_map):
     # set the same index names to be able to merge
     upgraded_lines.index.name = df_existing.index.name
     # Ensure type is preserved if missing from upgraded lines
-    
+
     columns_to_update = upgraded_lines.columns.difference(["type"])
     df_existing.update(upgraded_lines[columns_to_update])
-
 
     # add columns which were new in upgraded_lines
     df_existing = pd.concat([df_existing, upgraded_lines[new_columns]], axis=1)
@@ -373,7 +349,9 @@ def get_upgraded_lines(branch_component, n, upgraded_lines, line_map):
 
             if branch_component == "Line":
                 v_nom_existing = n.df(branch_component).at[original_idx, "v_nom"]
-                num_parallel_existing = n.df(branch_component).at[original_idx, "num_parallel"]
+                num_parallel_existing = n.df(branch_component).at[
+                    original_idx, "num_parallel"
+                ]
 
                 # ensure no NaN or zero
                 if pd.isna(v_nom_existing) or v_nom_existing == 0:
@@ -381,15 +359,17 @@ def get_upgraded_lines(branch_component, n, upgraded_lines, line_map):
                 if pd.isna(num_parallel_existing) or num_parallel_existing == 0:
                     num_parallel_existing = 1.0
 
-                scaling_factor = (
-                    (row["v_nom"] / v_nom_existing)
-                    * (row["num_parallel"] / num_parallel_existing)
+                scaling_factor = (row["v_nom"] / v_nom_existing) * (
+                    row["num_parallel"] / num_parallel_existing
                 )
 
             elif branch_component == "Link":
                 # only num_parallel applies (no voltage concept for links)
-                num_parallel_existing = n.df(branch_component).at[original_idx, "num_parallel"] \
-                    if "num_parallel" in n.df(branch_component).columns else 1.0
+                num_parallel_existing = (
+                    n.df(branch_component).at[original_idx, "num_parallel"]
+                    if "num_parallel" in n.df(branch_component).columns
+                    else 1.0
+                )
                 if pd.isna(num_parallel_existing) or num_parallel_existing == 0:
                     num_parallel_existing = 1.0
 
@@ -418,10 +398,6 @@ def get_upgraded_lines(branch_component, n, upgraded_lines, line_map):
     return df_existing
 
 
-    return df_existing
-
-
-
 def get_project_files(path, skip=[]):
     path = Path(path)
     lines = {}
@@ -445,13 +421,13 @@ def get_project_files(path, skip=[]):
     return lines
 
 
-def remove_projects_outside_countries(lines, ASEAN_shape):
+def remove_projects_outside_countries(lines, region_shape):
     """
     Remove projects which are not in the considered countries.
     """
-    ASEAN_shape_prepped = shapely.prepared.prep(ASEAN_shape)
+    region_shape_prepped = shapely.prepared.prep(region_shape)
     is_within_covered_countries = lines["geometry"].apply(
-        lambda x: ASEAN_shape_prepped.contains(x)
+        lambda x: region_shape_prepped.contains(x)
     )
 
     if not is_within_covered_countries.all():
@@ -492,17 +468,19 @@ def add_projects(
     adjust_lines_df,
     adjust_links_df,
     new_buses_df,
-    ASEAN_shape,
+    region_shape,
+    country_shapes,
     offshore_shapes,
     path,
     plan,
     status=["confirmed", "under construction"],
     skip=[],
+    distance_upper_bound=0.30,
 ):
     lines_dict = get_project_files(path, skip=skip)
     for key, lines in lines_dict.items():
         logger.info(f"Processing {key.replace('_', ' ')} projects from {plan}.")
-        #lines = remove_projects_outside_countries(lines, ASEAN_shape)
+        lines = remove_projects_outside_countries(lines, region_shape)
         if isinstance(status, dict):
             status = status[plan]
         lines = lines.loc[lines.project_status.isin(status)]
@@ -510,17 +488,25 @@ def add_projects(
             continue
         if key == "new_lines":
             new_lines, new_buses_df = connect_new_lines(
-                lines, n, new_buses_df,status, bus_carrier="AC",ASEAN_shape=ASEAN_shape_geojson
+                lines,
+                n,
+                new_buses_df,
+                status,
+                bus_carrier="AC",
+                country_shapes=country_shapes,
             )
             duplicate_lines = find_closest_lines(
-                n.lines, new_lines, distance_upper_bound=0.10, type="new"
+                n.lines,
+                new_lines,
+                distance_upper_bound=distance_upper_bound,
+                type="new",
             )
             new_lines = new_lines.drop(duplicate_lines.index, errors="ignore")
             new_lines_df = pd.concat([new_lines_df, new_lines])
             # add new lines to network to be able to find added duplicates
-            #n.add("Line", new_lines.index, **new_lines)
+            # n.add("Line", new_lines.index, **new_lines)
             new_lines_df["dc"] = 0
-            new_lines_df["underwater_fraction"] = 0.0 #only relevant for dc 
+            new_lines_df["underwater_fraction"] = 0.0  # only relevant for dc
             n.madd("Line", new_lines.index, **new_lines.to_dict(orient="list"))
         elif key == "new_links":
             new_links, new_buses_df = connect_new_lines(
@@ -529,12 +515,15 @@ def add_projects(
                 new_buses_df,
                 status,
                 offshore_shapes=offshore_shapes,
-                distance_upper_bound=0.4,
+                distance_upper_bound=0.3,
                 bus_carrier=["AC", "DC"],
-                ASEAN_shape=ASEAN_shape_geojson
+                country_shapes=country_shapes,
             )
             duplicate_links = find_closest_lines(
-                n.links, new_links, distance_upper_bound=0.10, type="new"
+                n.links,
+                new_links,
+                distance_upper_bound=distance_upper_bound,
+                type="new",
             )
             new_links = new_links.drop(duplicate_links.index, errors="ignore")
             set_underwater_fraction(new_links, offshore_shapes)
@@ -546,9 +535,7 @@ def add_projects(
 
             # CHECK FOR MISSING BUSES
             link_buses = pd.Series(
-                pd.concat([new_links["bus0"], new_links["bus1"]])
-                .unique(),
-                name="bus"
+                pd.concat([new_links["bus0"], new_links["bus1"]]).unique(), name="bus"
             )
             missing_buses = link_buses[~link_buses.isin(n.buses.index)]
 
@@ -558,17 +545,19 @@ def add_projects(
                     for port, bus in zip([0, 1], [row["bus0"], row["bus1"]]):
                         if bus in missing_buses.values:
                             coords = get_bus_coords_from_port(row["geometry"], port)
-                            new_bus_rows.append({
-                                "bus": bus,
-                                "x": coords[0],
-                                "y": coords[1],
-                                "v_nom": 380,
-                                "under_construction": True,
-                                "symbol": "substation",
-                                "substation_off": True,
-                                "substation_lv": True,
-                                "carrier": "AC" if row["carrier"] == "AC" else "DC"
-                            })
+                            new_bus_rows.append(
+                                {
+                                    "bus": bus,
+                                    "x": coords[0],
+                                    "y": coords[1],
+                                    "v_nom": 380,
+                                    "under_construction": True,
+                                    "symbol": "substation",
+                                    "substation_off": True,
+                                    "substation_lv": True,
+                                    "carrier": "AC" if row["carrier"] == "AC" else "DC",
+                                }
+                            )
 
                 if new_bus_rows:
                     new_buses = pd.DataFrame(new_bus_rows).set_index("bus")
@@ -576,25 +565,33 @@ def add_projects(
                     new_buses = new_buses[~new_buses.index.duplicated(keep="first")]
                     new_buses_df = pd.concat([new_buses_df, new_buses])
                     n.madd("Bus", new_buses.index, **new_buses.to_dict(orient="list"))
-                    logger.info(f"Added missing buses to new_buses_df and network:\n{new_buses.index.tolist()}")
+                    logger.info(
+                        f"Added missing buses to new_buses_df and network:\n{new_buses.index.tolist()}"
+                    )
 
             # Add new links to the network
             n.madd("Link", new_links.index, **new_links.to_dict(orient="list"))
 
-
         elif key == "upgraded_lines":
             line_map = find_closest_lines(
-                n.lines, lines, distance_upper_bound=0.30, type="upgraded"
+                n.lines,
+                lines,
+                distance_upper_bound=distance_upper_bound,
+                type="upgraded",
             )
             upgraded_lines = lines.loc[line_map.index]
             lines_to_adjust = adjust_decommissioning(upgraded_lines, line_map)
             adjust_lines_df = pd.concat([adjust_lines_df, lines_to_adjust])
             upgraded_lines = get_upgraded_lines("Line", n, upgraded_lines, line_map)
             upgraded_lines["dc"] = 0  # ensure upgraded AC lines have dc=0
-            upgraded_lines["underwater_fraction"] = 0.0 #only relevant for dc
+            upgraded_lines["underwater_fraction"] = 0.0  # only relevant for dc
             if "underground" in upgraded_lines.columns:
-                upgraded_lines["underground"] = upgraded_lines["underground"].astype("boolean")
-            upgraded_lines["under_construction"] = upgraded_lines["project_status"] != "existing"
+                upgraded_lines["underground"] = upgraded_lines["underground"].astype(
+                    "boolean"
+                )
+            upgraded_lines["under_construction"] = (
+                upgraded_lines["project_status"] != "existing"
+            )
 
             new_lines_df = pd.concat([new_lines_df, upgraded_lines])
 
@@ -602,7 +599,7 @@ def add_projects(
             line_map = find_closest_lines(
                 n.links.query("carrier=='DC'"),
                 lines,
-                distance_upper_bound=0.30,
+                distance_upper_bound=distance_upper_bound,
                 type="upgraded",
             )
             upgraded_links = lines.loc[line_map.index]
@@ -625,6 +622,15 @@ def fill_length_from_geometry(line, line_factor=1.2):
     return round(length, 1)
 
 
+def remove_holes(geom):
+    if geom.geom_type == "Polygon":
+        return Polygon(geom.exterior)
+    elif geom.geom_type == "MultiPolygon":
+        return MultiPolygon([Polygon(p.exterior) for p in geom.geoms])
+    else:
+        return geom  # In case it's something else
+
+
 if __name__ == "__main__":
     if "snakemake" not in globals():
         from _helpers import mock_snakemake
@@ -636,17 +642,6 @@ if __name__ == "__main__":
     s_max_pu = snakemake.params.s_max_pu
 
     n = pypsa.Network(snakemake.input.base_network)
-        # if any bus coord is literally "bus0" or non-numeric, show it
-    bad_bus_xy = n.buses[["x","y"]].astype(str).apply(lambda s: s.str.contains(r"\bbus0\b", case=False, na=False))
-    if bad_bus_xy.any().any():
-        print("buses with 'bus0' in x/y:")
-        print(n.buses.loc[bad_bus_xy.any(axis=1), ["x","y"]].head(20))
-
-    # if any link has bus0 value == "bus0"
-    bad_links = n.links["bus0"].astype(str).eq("bus0") | n.links["bus1"].astype(str).eq("bus0")
-    if bad_links.any():
-        print("links with literal bus0/bus1 == 'bus0':")
-        print(n.links.loc[bad_links, ["bus0","bus1"]].head(20))
 
     new_lines_df = pd.DataFrame()
     new_links_df = pd.DataFrame()
@@ -654,16 +649,14 @@ if __name__ == "__main__":
     adjust_links_df = pd.DataFrame()
     new_buses_df = pd.DataFrame()
 
-    ASEAN_shape = gpd.read_file(snakemake.input.ASEAN_shape).loc[0, "geometry"]
-    ASEAN_shape_geojson = gpd.read_file(snakemake.input.ASEAN_shape)
-    ASEAN_shape_geojson = ASEAN_shape_geojson.rename(columns={"name": "country"})
+    region_shape = remove_holes(gpd.read_file(snakemake.input.region_shape).geometry[0])
+    country_shapes = gpd.read_file(snakemake.input.country_shapes).rename(
+        columns={"name": "country"}
+    )
 
     offshore_shapes = gpd.read_file(snakemake.input.offshore_shapes).rename(
         {"name": "country"}, axis=1
     )
-
-
-
 
     transmission_projects = snakemake.params.transmission_projects
     projects = [
@@ -682,62 +675,68 @@ if __name__ == "__main__":
                 adjust_lines_df,
                 adjust_links_df,
                 new_buses_df,
-                ASEAN_shape,
+                region_shape,
+                country_shapes,
                 offshore_shapes,
                 path=path,
                 plan=project,
                 status=transmission_projects["status"],
                 skip=transmission_projects["skip"],
+                distance_upper_bound=transmission_projects["distance_upper_bound"],
             )
         )
     if "underground" in adjust_lines_df.columns:
         adjust_lines_df["underground"] = (
             adjust_lines_df["underground"].astype("bool").fillna(False)
         )
-       # Patch upgraded lines with s_nom still zero
-    mask_upgraded_lines = new_lines_df.index.str.contains("_upgraded")
-
-    if mask_upgraded_lines.any():
-        # Identify upgraded lines where s_nom is missing or zero
-        missing_capacity = new_lines_df.loc[mask_upgraded_lines, "s_nom"].fillna(0) == 0
-        affected = new_lines_df.loc[mask_upgraded_lines][missing_capacity]
-
-        for idx, row in affected.iterrows():
-            original_idx = idx.replace("_upgraded", "")
-            fallback_type = row.get("type", "N2XS(FL)2Y 1x240 RM/35 64/110 kV")
-            fallback_v_nom = row.get("v_nom", 115)
-            fallback_parallel = row.get("num_parallel", 1)
-
-            # If type is missing or unknown, fallback
-            if pd.isna(fallback_type) or fallback_type not in n.line_types.index:
-                logger.warning(
-                    f"Upgraded line {idx} has missing or unknown type. "
-                    f"Falling back to default type N2XS(FL)2Y 1x240 RM/35 64/110 kV"
-                )
-                fallback_type = "N2XS(FL)2Y 1x240 RM/35 64/110 kV"
-
-            # Use fallback current rating
-            i_nom = n.line_types.at[fallback_type, "i_nom"]
-
-            # Calculate fallback capacity
-            fallback_s_nom = np.sqrt(3) * i_nom * fallback_v_nom * fallback_parallel
-            fallback_s_nom = round(fallback_s_nom, 2)
-
-            new_lines_df.at[idx, "s_nom"] = fallback_s_nom
-
-            logger.warning(
-                f"Fallback s_nom for upgraded line {idx}: "
-                f"type={fallback_type}, v_nom={fallback_v_nom}, "
-                f"num_parallel={fallback_parallel} → s_nom={fallback_s_nom}"
-            )
-
+    # Patch upgraded lines with s_nom still zero
     if not new_lines_df.empty:
+        mask_upgraded_lines = new_lines_df.index.str.contains("_upgraded")
+
+        if mask_upgraded_lines.any():
+            # Identify upgraded lines where s_nom is missing or zero
+            missing_capacity = (
+                new_lines_df.loc[mask_upgraded_lines, "s_nom"].fillna(0) == 0
+            )
+            affected = new_lines_df.loc[mask_upgraded_lines][missing_capacity]
+
+            for idx, row in affected.iterrows():
+                original_idx = idx.replace("_upgraded", "")
+                fallback_type = row.get("type", "N2XS(FL)2Y 1x240 RM/35 64/110 kV")
+                fallback_v_nom = row.get("v_nom", 115)
+                fallback_parallel = row.get("num_parallel", 1)
+
+                # If type is missing or unknown, fallback
+                if pd.isna(fallback_type) or fallback_type not in n.line_types.index:
+                    logger.warning(
+                        f"Upgraded line {idx} has missing or unknown type. "
+                        f"Falling back to default type N2XS(FL)2Y 1x240 RM/35 64/110 kV"
+                    )
+                    fallback_type = "N2XS(FL)2Y 1x240 RM/35 64/110 kV"
+
+                # Use fallback current rating
+                i_nom = n.line_types.at[fallback_type, "i_nom"]
+
+                # Calculate fallback capacity
+                fallback_s_nom = np.sqrt(3) * i_nom * fallback_v_nom * fallback_parallel
+                fallback_s_nom = round(fallback_s_nom, 2)
+
+                new_lines_df.at[idx, "s_nom"] = fallback_s_nom
+
+                logger.warning(
+                    f"Fallback s_nom for upgraded line {idx}: "
+                    f"type={fallback_type}, v_nom={fallback_v_nom}, "
+                    f"num_parallel={fallback_parallel} → s_nom={fallback_s_nom}"
+                )
+
         line_type = "Al/St 240/40 4-bundle 380.0"
 
         # Add new line type for new lines
         # Only fill missing line types for NEW lines
         mask_new_lines = ~new_lines_df.index.str.contains("_upgraded")
-        new_lines_df.loc[mask_new_lines, "type"] = new_lines_df.loc[mask_new_lines, "type"].fillna(line_type)
+        new_lines_df.loc[mask_new_lines, "type"] = new_lines_df.loc[
+            mask_new_lines, "type"
+        ].fillna(line_type)
 
         new_lines_df["num_parallel"] = new_lines_df["num_parallel"].fillna(2)
 

@@ -17,6 +17,7 @@ import pandas as pd
 import powerplantmatching as pm
 import pypsa
 from _helpers import sanitize_carriers, sanitize_locations
+from prepare_sector_network import _assert_no_nans_in_timeseries, _assert_component_bounds_sane
 import xarray as xr
 
 # from _helpers import (
@@ -31,7 +32,36 @@ logger = logging.getLogger(__name__)
 cc = coco.CountryConverter()
 idx = pd.IndexSlice
 spatial = SimpleNamespace()
+def _assert_nom_bounds(n, tag=""):
+    """
+    hard-fail if any extendable asset has p_nom_min > p_nom_max
+    (this is immediate infeasibility)
+    """
+    import numpy as np
+    import pandas as pd
 
+    def _check(df, name):
+        if df.empty:
+            return
+        if not {"p_nom_extendable", "p_nom_min", "p_nom_max"}.issubset(df.columns):
+            return
+
+        ext = df["p_nom_extendable"].fillna(False).astype(bool)
+        pmin = df["p_nom_min"].fillna(0.0).astype(float)
+        pmax = df["p_nom_max"].astype(float)
+
+        finite = np.isfinite(pmax.values)
+        bad = ext & finite & (pmin.values > pmax.values + 1e-9)
+
+        if bad.any():
+            bad_idx = df.index[bad]
+            print(f"\n[INFEASIBLE BOUNDS] {tag} {name}: {bad.sum()} rows where p_nom_min > p_nom_max")
+            cols = [c for c in ["carrier","bus","bus0","bus1","build_year","p_nom","p_nom_min","p_nom_max","p_nom_extendable"] if c in df.columns]
+            print(df.loc[bad_idx, cols].head(50))
+            raise ValueError(f"Infeasible bounds detected in {name}: p_nom_min > p_nom_max")
+
+    _check(n.generators, "generators")
+    _check(n.links, "links")
 
 def add_build_year_to_new_assets(n, baseyear):
     """
@@ -583,23 +613,32 @@ def add_heating_capacities_installed_before_baseyear(
                 ],
             )
 
-def filter_transmission_project_build_year(n, year):
+
+
+def filter_transmission_project_build_year(n, params, year):
     """
     Remove transmission with build year later than the planning horizon
     """
-    links = n.links[(n.links.project_status != "") & (n.links.build_year > int(year))][
-        ["bus0", "bus1", "build_year", "p_nom"]
-    ]
-    lines = n.lines[(n.lines.build_year > int(year))][
-        ["bus0", "bus1", "build_year", "s_nom"]
-    ]
+    if params["set_by_build_year"]:
 
-    logger.info(
-        f"Remove transmission with build year later than {year}: \n{links}\n{lines}"
-    )
+        
 
-    n.mremove("Link", links.index)
-    n.mremove("Line", lines.index)
+        filter_year = max(int(year), 2024)
+
+        links = n.links[(n.links.carrier == "DC") & (n.links.build_year > filter_year)][
+            ["bus0", "bus1", "build_year", "p_nom"]
+        ]
+        lines = n.lines[(n.lines.build_year > filter_year)][
+            ["bus0", "bus1", "build_year", "s_nom"]
+        ]
+
+        logger.info(
+            f"Remove transmission with build year later than {year}: \n{links}\n{lines}"
+        )
+
+        n.mremove("Link", links.index)
+        n.mremove("Line", lines.index)
+
 
 def lock_oil_electricity_assets(n):
     # what we consider "electricity-side" buses
@@ -696,9 +735,6 @@ if __name__ == "__main__":
         n, grouping_years_power, costs, baseyear
     )
     lock_oil_electricity_assets(n) 
-    if snakemake.params.tp_build_year:
-        filter_transmission_project_build_year(n, baseyear)
-
     coal_gen = n.generators[n.generators.carrier.str.contains("coal", case=False, na=False)]
     coal_link = n.links[n.links.carrier.str.contains("coal", case=False, na=False)]
 
@@ -742,7 +778,16 @@ if __name__ == "__main__":
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
 
     # sanitize_carriers(n, snakemake.config)
+    filter_transmission_project_build_year(
+        n,
+        snakemake.params.transmission_projects,
+        baseyear,
+    )
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
+    _assert_nom_bounds(n, tag=f"after coal phaseout {baseyear}")
+    _assert_no_nans_in_timeseries(n)
+    _assert_component_bounds_sane(n)
+    print("[debug] sanity checks passed: no NaNs/infs, bounds look sane")
 
     n.export_to_netcdf(snakemake.output[0])

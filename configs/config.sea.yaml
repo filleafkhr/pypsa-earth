@@ -23,12 +23,12 @@ scenario:
   #- 2035
   #- 2040
   #- 2045  
-  #- 2050  
+  - 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-3h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
+  opts: [Co2L-24h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "3h"
+  - "24h"
 
 snapshots:
   start: "2018-01-01"
@@ -125,7 +125,7 @@ load_options:
       2040: 0
       2045: 0
       2050: 0
-    transport: #AEO8 BAS
+    transport: #land transport not used 
       2030: 0 #2344608000
       2035: 0 #2795852000 
       2040: 0
@@ -168,7 +168,16 @@ electricity:
     Generator: [solar, onwind, offwind-ac, offwind-dc, OCGT, CCGT]
     StorageUnit: [battery, H2] 
     Store: [battery, H2]
-
+  coal_phaseout:
+      enable: true          
+      start_year: 2030
+      end_year: 2050
+      target_year: 
+        2035: 0.75 
+        2040: 0.5
+        2045: 0.25
+        2050: 0
+      min_age: 10
 
 lines:
   s_nom_max: 2
@@ -218,6 +227,12 @@ sector:
     ASEAN_2040: 0.12
     ASEAN_2045: 0.16
     ASEAN_2050: 0.20 # in transport share 
+  international_bunkers: true
+  correction_shipping: True
+  remove_international: "SG" #Remove Singapore's international shipping demand
+  shipping_domestic_share: 0
+  correction_aviation: True
+  aviation_domestic_share: 0
   co2_network: false
   biomass_transport: false
   solid_biomass_potential: 1089 # TWh/a, biomass residues 
@@ -231,6 +246,7 @@ sector:
   co2_sequestration_potential: 120 #MtCO2/a sequestration potential in 2050 
   co2_sequestration_cost: 37.66 #EUR/tCO2 for sequestration of CO2, ASEAN max=450$/Ton
   shipping_hydrogen_liquefaction: false
+  min_part_load_fischer_tropsch: 0.17 #KIT paper
   space_heat_share: 0
   h2_cavern: false
   methanation: false

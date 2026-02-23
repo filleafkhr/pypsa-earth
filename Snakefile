@@ -2195,6 +2195,7 @@ if config["foresight"] == "myopic":
             existing_capacities=config["existing_capacities"],
             costs=config["costs"],
             tp_build_year=config["transmission_projects"]["set_by_build_year"],
+            transmission_projects=config["transmission_projects"],
         input:
             network=RESDIR
             + "prenetworks/elec_s{simpl}_{clusters}_ec_l{ll}_{opts}_{sopts}_{planning_horizons}_{discountrate}_{demand}_{h2export}export.nc",
@@ -2268,6 +2269,7 @@ if config["foresight"] == "myopic":
             # drop_leap_day=config["enable"]["drop_leap_day"],
             carriers=config["electricity"]["renewable_carriers"],
             tp_build_year=config["transmission_projects"]["set_by_build_year"],
+            transmission_projects=config["transmission_projects"],
         input:
             # unpack(input_profile_tech_brownfield),
             simplify_busmap="resources/" + RDIR + "bus_regions/busmap_elec_s{simpl}.csv",

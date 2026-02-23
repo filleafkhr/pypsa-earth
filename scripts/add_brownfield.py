@@ -14,8 +14,9 @@ import pypsa
 import xarray as xr
 from add_existing_baseyear import (
     add_build_year_to_new_assets,
-    filter_transmission_project_build_year,lock_oil_electricity_assets
+    filter_transmission_project_build_year,lock_oil_electricity_assets,_assert_nom_bounds
 )
+from prepare_sector_network import _assert_no_nans_in_timeseries, _assert_component_bounds_sane
 from _helpers import sanitize_carriers, sanitize_locations
 
 # from pypsa.clustering.spatial import normed_or_uniform
@@ -196,44 +197,20 @@ def apply_gas_trade_adjustments(n, cfg):
 
     print("applied gas_trade_adjustments")
 
-
-
-
 def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbose=True):
     """
-    One-shot coal/lignite supplier-side phaseout:
-      • reads elec_cfg['coal_phaseout'] (enable, start_year, target_year{year: frac})
-      • computes the fraction for `year` via piecewise-linear interpolation
-      • rescales supplier-side capacity:
-          - Generators: all with name/carrier matching coal|lignite
-          - Links: those with name/carrier matching coal|lignite OR with bus0 on a coal/lignite bus
-        For extendable assets: scales p_nom_max (and keeps p_nom <= p_nom_max).
-        For fixed assets: scales p_nom.
-      • Optional `per_bus_factors` (dict bus->factor) overrides the global fraction per bus0/bus.
+    Coal/lignite phaseout with debug prints.
 
-    Parameters
-    ----------
-    n : pypsa.Network
-    year : int
-    elec_cfg : dict
-      e.g.
-        coal_phaseout:
-          enable: true
-          start_year: 2030
-          target_year:
-            2040: 0.5
-            2050: 0.0
-          min_age: 10   # ignored here
-    per_bus_factors : dict[str,float] | None
-    verbose : bool
-
-    Returns
-    -------
-    float
-        applied global fraction for this year
+    NEW (industry coal -> gas switching):
+    - Specifically shift *industry coal demand* (Loads named "... coal for industry") into the
+      existing *gas for industry* Loads (named "... gas for industry"), instead of generic bus renaming.
+    - Works for full (fraction=0) and partial (0<f<1) phaseout.
+    - Updates the "industry coal emissions" Load to match the remaining coal demand.
+      (Shifted demand becomes gas demand, so gas CO2 is handled by your gas->co2 Link.)
+    - Keeps your supplier-side scaling for coal generators/links as before.
     """
     # ---- helpers (no extra imports) ----
-    def _cfg_fraction(y:int, cfg:dict) -> float:
+    def _cfg_fraction(y: int, cfg: dict) -> float:
         cp = (cfg or {}).get("coal_phaseout", {}) or {}
         if not cp.get("enable", False):
             return 1.0
@@ -242,7 +219,6 @@ def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbos
         except Exception:
             start = y
 
-        # targets like {"2040":0.5,"2050":0.0} -> {2040:0.5, 2050:0.0}
         raw = cp.get("target_year") or {}
         targets = {int(k): float(v) for k, v in raw.items()}
         if not targets:
@@ -250,7 +226,7 @@ def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbos
 
         if y <= start:
             return 1.0
-        items = sorted(targets.items())  # [(2040,0.5),(2050,0.0)]
+        items = sorted(targets.items())
         if y >= items[-1][0]:
             return items[-1][1]
 
@@ -258,89 +234,312 @@ def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbos
         for y2, f2 in items:
             if y <= y2:
                 t = (y - y1) / float(y2 - y1)
-                return f1 + t*(f2 - f1)
+                return f1 + t * (f2 - f1)
             y1, f1 = y2, f2
         return f1
-
-    def _icontains(series, patt):
-        s = series if isinstance(series, pd.Series) else pd.Series(series, index=n.links.index if hasattr(n, "links") else None)
-        return s.astype(str).str.contains(patt, case=False, regex=True, na=False)
 
     def _coal_like_df(df):
         name = df["name"] if "name" in df else pd.Series("", index=df.index)
         carr = df["carrier"] if "carrier" in df else pd.Series("", index=df.index)
         patt = r"\b(?:coal|lignite)\b"
-        return name.astype(str).str.contains(patt, case=False, regex=True, na=False) | \
-               carr.astype(str).str.contains(patt, case=False, regex=True, na=False)
+        return (
+            name.astype(str).str.contains(patt, case=False, regex=True, na=False)
+            | carr.astype(str).str.contains(patt, case=False, regex=True, na=False)
+        )
 
-    def _scale_cap(df, mask, factor_like):
-        if getattr(mask, "any", lambda: False)():
-            # factor_like can be scalar or Series aligned to df.index
-            if np.isscalar(factor_like):
-                fac = pd.Series(factor_like, index=df.index)
-            else:
-                fac = pd.Series(factor_like).reindex(df.index).fillna(1.0)
+    # ---- small debug helper ----
+    def _dbg_df(df, mask, label, topn=12):
+        if not verbose or df is None or getattr(df, "empty", True):
+            return
+        m = mask.fillna(False) if isinstance(mask, pd.Series) else mask
+        cnt = int(m.sum()) if hasattr(m, "sum") else 0
+        print(f"[coal phaseout][dbg] {label}: affected={cnt} / {len(df)}")
+        if cnt == 0:
+            return
+        sub = df.loc[m].copy()
+        ext = sub.get("p_nom_extendable", False)
+        ext_cnt = int(ext.fillna(False).sum()) if isinstance(ext, pd.Series) else 0
+        print(f"[coal phaseout][dbg] {label}: extendable={ext_cnt}, fixed={cnt - ext_cnt}")
+        for col in ["p_nom", "p_nom_min", "p_nom_max"]:
+            if col in sub.columns:
+                v = pd.to_numeric(sub[col], errors="coerce")
+                n_nan = int(v.isna().sum())
+                n_inf = int(np.isinf(v.to_numpy()).sum())
+                print(f"[coal phaseout][dbg] {label}: {col} nan={n_nan}, inf={n_inf}")
+        for col in ["p_nom", "p_nom_min", "p_nom_max"]:
+            if col in sub.columns:
+                v = pd.to_numeric(sub[col], errors="coerce").fillna(0.0)
+                print(f"[coal phaseout][dbg] {label}: sum({col})={float(v.sum()):.6g}")
+        sort_col = "p_nom" if "p_nom" in sub.columns else ("p_nom_max" if "p_nom_max" in sub.columns else None)
+        if sort_col is not None:
+            vv = pd.to_numeric(sub[sort_col], errors="coerce").fillna(0.0)
+            idx = vv.sort_values(ascending=False).head(topn).index
+            cols = [c for c in ["name", "carrier", "bus", "bus0", "bus1", "p_nom_extendable", "p_nom", "p_nom_min", "p_nom_max"] if c in sub.columns]
+            print(f"[coal phaseout][dbg] {label}: top {min(topn, len(idx))} by {sort_col}:")
+            print(sub.loc[idx, cols])
 
-            ext = df.get("p_nom_extendable", False)
-            ext = ext.fillna(False) if isinstance(ext, pd.Series) else pd.Series(False, index=df.index)
+    def _scale_cap(df, mask, factor_like, label=""):
+        if not getattr(mask, "any", lambda: False)():
+            return
 
-            ext_mask = mask & ext
-            fix_mask = mask & (~ext)
+        if np.isscalar(factor_like):
+            fac = pd.Series(float(factor_like), index=df.index)
+        else:
+            fac = pd.Series(factor_like).reindex(df.index).astype(float).fillna(1.0)
 
-            if ext_mask.any():
+        ext = df.get("p_nom_extendable", False)
+        ext = ext.fillna(False) if isinstance(ext, pd.Series) else pd.Series(False, index=df.index)
+
+        # hard-zero rows where factor <= 0 to avoid inf*0 -> NaN
+        zero_mask = mask & (fac <= 0.0)
+        if zero_mask.any():
+            if verbose:
+                print(f"[coal phaseout][dbg] {label}: hard-zero rows={int(zero_mask.sum())}")
+            for col in ["p_nom", "p_nom_min", "p_nom_max"]:
+                if col in df.columns:
+                    df.loc[zero_mask, col] = 0.0
+            mask = mask & (~zero_mask)
+            if not mask.any():
+                if verbose:
+                    _dbg_df(df, zero_mask, f"{label} (post hard-zero)")
+                return
+
+        ext_mask = mask & ext
+        fix_mask = mask & (~ext)
+
+        if verbose:
+            _dbg_df(df, mask | zero_mask, f"{label} (pre-scale)")
+            fsub = fac.loc[mask | zero_mask].astype(float)
+            print(
+                f"[coal phaseout][dbg] {label}: factor stats "
+                f"min={float(fsub.min()):.4g}, mean={float(fsub.mean()):.4g}, max={float(fsub.max()):.4g}"
+            )
+
+        # fixed assets
+        if fix_mask.any():
+            fac_fix = fac.loc[fix_mask].astype(float)
+            if "p_nom" in df:
+                pnom = pd.to_numeric(df.loc[fix_mask, "p_nom"], errors="coerce").fillna(0.0)
+                df.loc[fix_mask, "p_nom"] = pnom * fac_fix
+            if "p_nom_min" in df:
+                pmin = pd.to_numeric(df.loc[fix_mask, "p_nom_min"], errors="coerce").fillna(0.0)
+                df.loc[fix_mask, "p_nom_min"] = pmin * fac_fix
+            if "p_nom" in df and "p_nom_min" in df:
+                pnom_new = pd.to_numeric(df.loc[fix_mask, "p_nom"], errors="coerce").fillna(0.0)
+                pmin_new = pd.to_numeric(df.loc[fix_mask, "p_nom_min"], errors="coerce").fillna(0.0)
+                df.loc[fix_mask, "p_nom_min"] = np.minimum(pmin_new, pnom_new)
+
+        # extendable assets
+        if ext_mask.any():
+            fac_ext = fac.loc[ext_mask].astype(float)
+            if "p_nom_max" in df:
+                pmax_raw = pd.to_numeric(df.loc[ext_mask, "p_nom_max"], errors="coerce")
+                if verbose:
+                    print(
+                        f"[coal phaseout][dbg] {label}: ext p_nom_max raw "
+                        f"nan={int(pmax_raw.isna().sum())}, inf={int(np.isinf(pmax_raw.to_numpy()).sum())}"
+                    )
+                pmax = pmax_raw.fillna(np.inf)
+                df.loc[ext_mask, "p_nom_max"] = pmax * fac_ext
+            if "p_nom_min" in df:
+                pmin = pd.to_numeric(df.loc[ext_mask, "p_nom_min"], errors="coerce").fillna(0.0)
+                df.loc[ext_mask, "p_nom_min"] = pmin * fac_ext
+            if "p_nom" in df:
+                pnom = pd.to_numeric(df.loc[ext_mask, "p_nom"], errors="coerce").fillna(0.0)
                 if "p_nom_max" in df:
-                    df.loc[ext_mask, "p_nom_max"] *= fac.loc[ext_mask]
-                if "p_nom_min" in df:
-                    df.loc[ext_mask, "p_nom_min"] *= fac.loc[ext_mask]
-                if "p_nom" in df and "p_nom_max" in df:
-                    df.loc[ext_mask, "p_nom"] = np.minimum(df.loc[ext_mask, "p_nom"], df.loc[ext_mask, "p_nom_max"])
+                    pmax_new = pd.to_numeric(df.loc[ext_mask, "p_nom_max"], errors="coerce")
+                    finite = np.isfinite(pmax_new.to_numpy())
+                    pnom_vals = pnom.to_numpy()
+                    pmax_vals = pmax_new.to_numpy()
+                    pnom_vals[finite] = np.minimum(pnom_vals[finite], pmax_vals[finite])
+                    df.loc[ext_mask, "p_nom"] = pnom_vals
+                else:
+                    df.loc[ext_mask, "p_nom"] = pnom
 
-            if fix_mask.any() and "p_nom" in df:
-                df.loc[fix_mask, "p_nom"] *= fac.loc[fix_mask]
+        if verbose:
+            _dbg_df(df, (mask | zero_mask), f"{label} (post-scale)")
 
     # ---- compute fraction from config ----
-    fraction = _cfg_fraction(int(year), elec_cfg)
+    fraction = float(_cfg_fraction(int(year), elec_cfg))
+    if verbose:
+        cp = (elec_cfg or {}).get("coal_phaseout", {}) or {}
+        print(
+            f"[coal phaseout] year={year} fraction={fraction:.3f} | "
+            f"cfg: enable={cp.get('enable', False)} start_year={cp.get('start_year', None)} "
+            f"targets={cp.get('target_year', None)}"
+        )
 
-    # ---- identify coal buses (supplier side for links) ----
-    coal_bus_mask = n.buses["carrier"].astype(str).str.contains(r"\b(?:coal|lignite)\b", case=False, regex=True, na=False) \
-                    if ("carrier" in n.buses) else pd.Series(False, index=n.buses.index)
-    coal_buses = n.buses.index[coal_bus_mask]
-
-    # optional per-bus overrides
     per_bus_factors = per_bus_factors or {}
 
-    # ---- GENERATORS (suppliers by definition) ----
+    # ======================================================================
+    # INDUSTRY: COAL -> GAS demand switching (your specific Loads)
+    # ======================================================================
+    if not n.loads.empty:
+        # coal industry loads created like: node + " coal for industry"
+        coal_ind_mask = n.loads.index.astype(str).str.endswith(" coal for industry")
+        if "carrier" in n.loads.columns:
+            coal_ind_mask = coal_ind_mask | (n.loads["carrier"].astype(str) == "coal for industry")
+
+        coal_ind_loads = n.loads.index[coal_ind_mask]
+
+        if verbose:
+            print(f"[coal phaseout][dbg] industry coal loads found: {len(coal_ind_loads)}")
+
+        if len(coal_ind_loads):
+            # infer corresponding gas load names: replace suffix
+            gas_ind_loads = pd.Index(
+                [str(i).replace(" coal for industry", " gas for industry") for i in coal_ind_loads],
+                dtype=str,
+            )
+
+            # ensure gas loads exist (if your add_industry created them, they should exist)
+            missing_gas = gas_ind_loads.difference(n.loads.index)
+            if len(missing_gas):
+                if verbose:
+                    print(f"[coal phaseout][dbg] creating missing gas loads: {len(missing_gas)}")
+                for ld in missing_gas:
+                    # best guess bus name equals load name in your pattern
+                    bus = ld
+                    if bus not in n.buses.index:
+                        # fallback: if bus not exist, skip rather than creating wrong topology
+                        if verbose:
+                            print(f"[coal phaseout][warn] gas bus '{bus}' not in n.buses; cannot create Load '{ld}'")
+                        continue
+                    n.add("Load", ld, bus=bus)
+                    if "carrier" in n.loads.columns:
+                        n.loads.at[ld, "carrier"] = "gas for industry"
+
+            # align to existing gas loads only
+            gas_ind_loads = gas_ind_loads.intersection(n.loads.index)
+
+            # read current coal p_set (MW)
+            coal_pset = pd.to_numeric(n.loads.loc[coal_ind_loads, "p_set"], errors="coerce").fillna(0.0)
+
+            if fraction <= 0.0:
+                # move 100% coal demand to gas
+                shift = 1.0
+                if verbose:
+                    print(f"[coal phaseout] fraction=0 -> shifting {len(coal_ind_loads)} coal industry loads fully to gas")
+
+                # add to gas loads
+                if len(gas_ind_loads):
+                    gas_now = pd.to_numeric(n.loads.loc[gas_ind_loads, "p_set"], errors="coerce").fillna(0.0)
+                    # map by matching name replacement
+                    coal_to_gas = pd.Series(gas_ind_loads, index=coal_ind_loads)
+                    add_to_gas = coal_pset.copy()
+                    add_to_gas.index = coal_to_gas.loc[add_to_gas.index].values
+                    n.loads.loc[gas_ind_loads, "p_set"] = (gas_now + add_to_gas.reindex(gas_ind_loads).fillna(0.0)).values
+
+                # zero coal loads
+                n.loads.loc[coal_ind_loads, "p_set"] = 0.0
+
+            elif 0.0 < fraction < 1.0:
+                shift = 1.0 - fraction
+                if verbose:
+                    print(f"[coal phaseout] partial -> coal*{fraction:.3f}, shift {shift:.3f} to gas for industry")
+
+                # scale coal down
+                n.loads.loc[coal_ind_loads, "p_set"] = (coal_pset * fraction).values
+
+                # add shifted part to gas
+                if len(gas_ind_loads):
+                    gas_now = pd.to_numeric(n.loads.loc[gas_ind_loads, "p_set"], errors="coerce").fillna(0.0)
+                    coal_to_gas = pd.Series(gas_ind_loads, index=coal_ind_loads)
+                    add_to_gas = (coal_pset * shift)
+                    add_to_gas.index = coal_to_gas.loc[add_to_gas.index].values
+                    n.loads.loc[gas_ind_loads, "p_set"] = (gas_now + add_to_gas.reindex(gas_ind_loads).fillna(0.0)).values
+
+            # fraction == 1 -> do nothing
+
+            # Update coal emissions load to match remaining coal industry demand
+            # (Shifted share is now gas and should emit via your gas->co2 link.)
+            if "industry coal emissions" in n.loads.index:
+                # remaining coal MW after scaling
+                coal_remaining = pd.to_numeric(n.loads.loc[coal_ind_loads, "p_set"], errors="coerce").fillna(0.0).sum()
+                # CO2 intensity for coal must be available in n.costs or costs table; here we assume you stored it on n
+                # If you don't have access to `costs` here, read from n.links/n.carriers or pass it in.
+                # Common pattern: put CO2 intensity into n.carriers or n.global_constraints externally.
+                try:
+                    coal_intensity = float(n.carriers.at["coal", "co2_emissions"])  # <- only if you have this
+                except Exception:
+                    # fallback: keep previous value if we can't infer intensity here
+                    coal_intensity = None
+
+                if coal_intensity is not None:
+                    n.loads.at["industry coal emissions", "p_set"] = -float(coal_remaining * coal_intensity)
+                    if verbose:
+                        print(f"[coal phaseout][dbg] updated 'industry coal emissions' to {-coal_remaining * coal_intensity:.6g}")
+                else:
+                    if verbose:
+                        print("[coal phaseout][warn] could not infer coal CO2 intensity here; 'industry coal emissions' not updated.")
+
+    # ======================================================================
+    # SUPPLIER-SIDE scaling (your existing logic)
+    # ======================================================================
+
+    # ---- identify coal buses (supplier side for links) ----
+    coal_bus_mask = (
+        n.buses["carrier"].astype(str).str.contains(r"\b(?:coal|lignite)\b", case=False, regex=True, na=False)
+        if ("carrier" in n.buses)
+        else pd.Series(False, index=n.buses.index)
+    )
+    coal_buses = n.buses.index[coal_bus_mask]
+    if verbose:
+        print(f"[coal phaseout][dbg] coal buses: {len(coal_buses)}")
+
+    # ---- GENERATORS ----
     if not n.generators.empty:
         g_mask = _coal_like_df(n.generators)
+        if verbose:
+            _dbg_df(n.generators, g_mask, "Generators (identified)")
         if g_mask.any():
             if per_bus_factors:
-                g_fac = pd.Series([per_bus_factors.get(b, fraction) for b in n.generators["bus"]], index=n.generators.index)
-                _scale_cap(n.generators, g_mask, g_fac)
+                g_fac = pd.Series(
+                    [per_bus_factors.get(b, fraction) for b in n.generators["bus"]],
+                    index=n.generators.index,
+                    dtype=float,
+                )
+                _scale_cap(n.generators, g_mask, g_fac, label="Generators")
             else:
-                _scale_cap(n.generators, g_mask, fraction)
+                _scale_cap(n.generators, g_mask, fraction, label="Generators")
 
-    # ---- LINKS (scale only those that *consume* coal on input/bus0) ----
+    # ---- LINKS ----
     if not n.links.empty:
-        # coal-like by name/carrier OR bus0 in a coal bus
         l_mask_name = _coal_like_df(n.links)
         l_mask_bus0 = n.links["bus0"].isin(coal_buses) if "bus0" in n.links else pd.Series(False, index=n.links.index)
         l_mask = l_mask_name | l_mask_bus0
+
+        if verbose:
+            print(
+                f"[coal phaseout][dbg] Links masks: "
+                f"name/carrier={int(l_mask_name.sum())}, bus0_on_coal_bus={int(l_mask_bus0.sum())}, union={int(l_mask.sum())}"
+            )
+
         if l_mask.any():
             if per_bus_factors and "bus0" in n.links:
-                l_fac = pd.Series([per_bus_factors.get(b0, fraction) for b0 in n.links["bus0"]], index=n.links.index)
-                _scale_cap(n.links, l_mask, l_fac)
+                l_fac = pd.Series(
+                    [per_bus_factors.get(b0, fraction) for b0 in n.links["bus0"]],
+                    index=n.links.index,
+                    dtype=float,
+                )
+                _scale_cap(n.links, l_mask, l_fac, label="Links")
             else:
-                _scale_cap(n.links, l_mask, fraction)
+                _scale_cap(n.links, l_mask, fraction, label="Links")
 
     if verbose:
         def _sum(df, sel):
-            return float(df.loc[sel, "p_nom"].sum()) if ("p_nom" in df and sel.any()) else 0.0
+            if df is None or getattr(df, "empty", True) or not sel.any() or "p_nom" not in df:
+                return 0.0
+            return float(pd.to_numeric(df.loc[sel, "p_nom"], errors="coerce").fillna(0.0).sum())
+
         g_sel = _coal_like_df(n.generators) if not n.generators.empty else pd.Series([], dtype=bool)
         l_sel = _coal_like_df(n.links) if not n.links.empty else pd.Series([], dtype=bool)
         g_cap = _sum(n.generators, g_sel)
         l_cap = _sum(n.links, l_sel)
-        print(f"[coal phaseout] year={year} factor={fraction:.3f} | "
-              f"[supplier-side] gen≈{g_cap:.3e} MW, link≈{l_cap:.3e} MW")
+        print(
+            f"[coal phaseout] done | year={year} factor={fraction:.3f} | "
+            f"[supplier-side] gen_p_nom_sum≈{g_cap:.6g} MW, link_p_nom_sum≈{l_cap:.6g} MW"
+        )
 
     return fraction
 
@@ -882,6 +1081,52 @@ if __name__ == "__main__":
     apply_storage_country_rules(n, snakemake.config)
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
+    _assert_nom_bounds(n, tag=f"after coal phaseout {year}")
+  
+    raw = n.generators["p_nom"]
+    num = pd.to_numeric(raw, errors="coerce")
+    bad = num.isna()
+
+    print("\n[debug] generators.p_nom")
+    print("  bad count:", int(bad.sum()))
+    print("  top raw bad values:")
+    print(raw[bad].astype(str).value_counts().head(20))
+
+    cols = [c for c in ["carrier","bus","build_year","p_nom_extendable","p_nom","p_nom_min","p_nom_max","p_nom_opt"] if c in n.generators.columns]
+    print("\n  sample bad rows:")
+    print(n.generators.loc[bad, cols].head(50))
+
+
+
+    def _fix_nan_p_nom_max(n):
+        for df_name in ["generators", "links"]:
+            df = getattr(n, df_name)
+            if df.empty or "p_nom_max" not in df.columns:
+                continue
+
+            pmax = pd.to_numeric(df["p_nom_max"], errors="coerce")
+            ext = df.get("p_nom_extendable", False)
+            ext = ext.fillna(False).astype(bool) if isinstance(ext, pd.Series) else pd.Series(False, index=df.index)
+
+            nan = pmax.isna()
+            if nan.any():
+                # only meaningful for extendables; set to inf
+                fix = nan & ext
+                if fix.any():
+                    df.loc[fix, "p_nom_max"] = np.inf
+                    print(f"[fix] set {fix.sum()} NaN {df_name}.p_nom_max to inf (extendable assets)")
+
+    _fix_nan_p_nom_max(n)
+
+    _assert_no_nans_in_timeseries(n)
+    _assert_component_bounds_sane(n)
+    print("[debug] sanity checks passed: no NaNs/infs, bounds look sane")
+
+    filter_transmission_project_build_year(
+        n,
+        snakemake.params.transmission_projects,
+        year,
+    )
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])

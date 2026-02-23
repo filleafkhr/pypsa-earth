@@ -553,6 +553,15 @@ export:
     fill_time: 24 # hours, for 48h see Hampp2021
     unload_time: 24 # hours for 48h see Hampp2021
 
+custom_RE_cap:
+  enable: true
+  units: GW
+  caps:
+    solar: 0
+    solar rooftop: 0
+    onwind: 800
+    offwind: 300   # applies to offwind-ac + offwind-dc combined
+
 custom_data:
   renewables: [] # ['csp', 'rooftop-solar', 'solar']
   elec_demand: false
