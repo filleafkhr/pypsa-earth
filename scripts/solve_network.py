@@ -110,20 +110,34 @@ def prepare_network(n, solve_opts, config):
         n.line_volume_limit_dual = n.global_constraints.at["lv_limit", "mu"]
 
     if solve_opts.get("load_shedding"):
-        n.add("Carrier", "Load")
+        if "load" not in n.carriers.index:
+            n.add("Carrier", "load")
+
+        # aggregate load by bus (bus names) over time, then take peak per bus
+        load_by_bus_t = n.loads_t.p_set.groupby(n.loads.bus, axis=1).sum()
+        peak_by_bus = load_by_bus_t.max()  # index: bus
+
+        # only buses that actually have positive peak load
+        buses_with_load = peak_by_bus[peak_by_bus > 0].index
+        cap = (1.2 * peak_by_bus.loc[buses_with_load]).clip(lower=1.0)  # MW
+
         n.madd(
             "Generator",
-            n.buses.index,
-            " load",
-            bus=n.buses.index,
+            buses_with_load,
+            " load_shed",
+            bus=buses_with_load,
             carrier="load",
-            sign=1e-3,  # Adjust sign to measure p and p_nom in kW instead of MW
-            marginal_cost=1e2,  # Eur/kWh
-            # intersect between macroeconomic and surveybased
-            # willingness to pay
-            # http://journal.frontiersin.org/article/10.3389/fenrg.2015.00055/full
-            p_nom=1e9,  # kW
+            marginal_cost=1e6,      # EUR/MWh (choose your VOLL)
+            p_nom=cap.values,       # MW
+            p_nom_extendable=False,
         )
+
+    if solve_opts.get("add_lv_buffer"): #to kill micro shedding
+        dist = n.links.index[n.links.carrier=="electricity distribution grid"]
+        n.links.loc[dist, "p_nom_extendable"] = True
+        n.links.loc[dist, "p_nom_min"] = np.maximum(
+            n.links.loc[dist, "p_nom_opt"].fillna(0.0).values, 0.0
+        ) + 0.1
 
     if solve_opts.get("noisy_costs"):
         for t in n.iterate_components():

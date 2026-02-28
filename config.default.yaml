@@ -554,7 +554,7 @@ export:
     unload_time: 24 # hours for 48h see Hampp2021
 
 custom_RE_cap:
-  enable: true
+  enable: false
   units: GW
   caps:
     solar: 0
@@ -813,6 +813,7 @@ solving:
   options:
     formulation: kirchhoff
     load_shedding: true
+    add_lv_buffer: false
     noisy_costs: true
     min_iterations: 4
     max_iterations: 6

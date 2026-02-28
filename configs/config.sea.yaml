@@ -26,9 +26,9 @@ scenario:
   - 2050  
   demand: 
   - "ASEAN"
-  opts: [Co2L-24h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
+  opts: [Co2L-5h] #Co2L-EQ0.8c- CO2 limit, 1H, 80% self sufficiency
   sopts:
-  - "24h"
+  - "5h"
 
 snapshots:
   start: "2018-01-01"
@@ -125,6 +125,7 @@ load_options:
       2040: 0
       2045: 0
       2050: 0
+    process_emissions_correction: 0.1
     transport: #land transport not used 
       2030: 0 #2344608000
       2035: 0 #2795852000 
@@ -198,6 +199,7 @@ costs:
 fossil_reserves:
   oil: 19212.76 #TWh 11.8 billion bbo
   coal: 65651.8 #9,408.4 million tons (Mt), 6000 kcal/kg = 6.978 megawatt-hours (MWh)/ton
+  #gas: 10000 #todo look for values
 
 export:
   h2export: [0] #no export outside of the ASEAN region
@@ -229,10 +231,8 @@ sector:
     ASEAN_2050: 0.20 # in transport share 
   international_bunkers: true
   correction_shipping: True
-  remove_international: "SG" #Remove Singapore's international shipping demand
-  shipping_domestic_share: 0
   correction_aviation: True
-  aviation_domestic_share: 0
+  correction_ASEAN: 0.066666667 
   co2_network: false
   biomass_transport: false
   solid_biomass_potential: 1089 # TWh/a, biomass residues 
@@ -248,14 +248,14 @@ sector:
   shipping_hydrogen_liquefaction: false
   min_part_load_fischer_tropsch: 0.17 #KIT paper
   space_heat_share: 0
-  h2_cavern: false
+  h2_cavern: true
   methanation: false
   helmeth: false
-  dac: false
-  SMR: false
-  SMR CC: false
+  dac: true
+  SMR: true
+  SMR CC: true
   v2g: false
-  chp: false
+  chp: false #because i dont have space heating 
   transport_internal_combustion_efficiency: 1 #Demand scaled to energy values
   lignite:
     spatial_lignite: true

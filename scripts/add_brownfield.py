@@ -16,7 +16,7 @@ from add_existing_baseyear import (
     add_build_year_to_new_assets,
     filter_transmission_project_build_year,lock_oil_electricity_assets,_assert_nom_bounds
 )
-from prepare_sector_network import _assert_no_nans_in_timeseries, _assert_component_bounds_sane
+from prepare_sector_network import _assert_no_nans_in_timeseries, _fill_nan_store_p_nom, _assert_component_bounds_sane
 from _helpers import sanitize_carriers, sanitize_locations
 
 # from pypsa.clustering.spatial import normed_or_uniform
@@ -358,6 +358,95 @@ def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbos
 
         if verbose:
             _dbg_df(df, (mask | zero_mask), f"{label} (post-scale)")
+    def _scale_store_cap(df, mask, factor_like, label=""):
+        """
+        Scale Store energy capacities (e_nom/e_nom_min/e_nom_max) and e_initial.
+        Mirrors _scale_cap logic but for Store energy, not power.
+        """
+        if not getattr(mask, "any", lambda: False)():
+            return
+
+        if np.isscalar(factor_like):
+            fac = pd.Series(float(factor_like), index=df.index)
+        else:
+            fac = pd.Series(factor_like).reindex(df.index).astype(float).fillna(1.0)
+
+        ext = df.get("e_nom_extendable", False)
+        ext = ext.fillna(False) if isinstance(ext, pd.Series) else pd.Series(False, index=df.index)
+
+        # hard-zero rows where factor <= 0 to avoid inf*0 -> NaN
+        zero_mask = mask & (fac <= 0.0)
+        if zero_mask.any():
+            if verbose:
+                print(f"[coal phaseout][dbg] {label}: hard-zero rows={int(zero_mask.sum())}")
+            for col in ["e_nom", "e_nom_min", "e_nom_max", "e_initial"]:
+                if col in df.columns:
+                    df.loc[zero_mask, col] = 0.0
+            mask = mask & (~zero_mask)
+            if not mask.any():
+                if verbose:
+                    _dbg_df(df, zero_mask, f"{label} (post hard-zero)")
+                return
+
+        ext_mask = mask & ext
+        fix_mask = mask & (~ext)
+
+        if verbose:
+            _dbg_df(df, mask | zero_mask, f"{label} (pre-scale)")
+            fsub = fac.loc[mask | zero_mask].astype(float)
+            print(
+                f"[coal phaseout][dbg] {label}: factor stats "
+                f"min={float(fsub.min()):.4g}, mean={float(fsub.mean()):.4g}, max={float(fsub.max()):.4g}"
+            )
+
+        # fixed stores: scale e_nom / e_nom_min and clamp min<=nom
+        if fix_mask.any():
+            fac_fix = fac.loc[fix_mask].astype(float)
+            if "e_nom" in df:
+                enom = pd.to_numeric(df.loc[fix_mask, "e_nom"], errors="coerce").fillna(0.0)
+                df.loc[fix_mask, "e_nom"] = enom * fac_fix
+            if "e_nom_min" in df:
+                emin = pd.to_numeric(df.loc[fix_mask, "e_nom_min"], errors="coerce").fillna(0.0)
+                df.loc[fix_mask, "e_nom_min"] = emin * fac_fix
+            if "e_nom" in df and "e_nom_min" in df:
+                enom_new = pd.to_numeric(df.loc[fix_mask, "e_nom"], errors="coerce").fillna(0.0)
+                emin_new = pd.to_numeric(df.loc[fix_mask, "e_nom_min"], errors="coerce").fillna(0.0)
+                df.loc[fix_mask, "e_nom_min"] = np.minimum(emin_new, enom_new)
+
+        # extendable stores: scale e_nom_max / e_nom_min and clamp e_nom<=e_nom_max
+        if ext_mask.any():
+            fac_ext = fac.loc[ext_mask].astype(float)
+            if "e_nom_max" in df:
+                emax_raw = pd.to_numeric(df.loc[ext_mask, "e_nom_max"], errors="coerce")
+                if verbose:
+                    print(
+                        f"[coal phaseout][dbg] {label}: ext e_nom_max raw "
+                        f"nan={int(emax_raw.isna().sum())}, inf={int(np.isinf(emax_raw.to_numpy()).sum())}"
+                    )
+                emax = emax_raw.fillna(np.inf)
+                df.loc[ext_mask, "e_nom_max"] = emax * fac_ext
+            if "e_nom_min" in df:
+                emin = pd.to_numeric(df.loc[ext_mask, "e_nom_min"], errors="coerce").fillna(0.0)
+                df.loc[ext_mask, "e_nom_min"] = emin * fac_ext
+            if "e_nom" in df:
+                enom = pd.to_numeric(df.loc[ext_mask, "e_nom"], errors="coerce").fillna(0.0)
+                if "e_nom_max" in df:
+                    emax_new = pd.to_numeric(df.loc[ext_mask, "e_nom_max"], errors="coerce")
+                    finite = np.isfinite(emax_new.to_numpy())
+                    enom_vals = enom.to_numpy()
+                    emax_vals = emax_new.to_numpy()
+                    enom_vals[finite] = np.minimum(enom_vals[finite], emax_vals[finite])
+                    df.loc[ext_mask, "e_nom"] = enom_vals
+                else:
+                    df.loc[ext_mask, "e_nom"] = enom
+
+        # scale e_initial too (so coal in the tank disappears proportionally)
+        if "e_initial" in df.columns:
+            ei = pd.to_numeric(df.loc[mask, "e_initial"], errors="coerce").fillna(0.0)
+            df.loc[mask, "e_initial"] = (ei * fac.loc[mask].astype(float)).values
+
+        if verbose:
+            _dbg_df(df, (mask | zero_mask), f"{label} (post-scale)")
 
     # ---- compute fraction from config ----
     fraction = float(_cfg_fraction(int(year), elec_cfg))
@@ -502,7 +591,29 @@ def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbos
                 _scale_cap(n.generators, g_mask, g_fac, label="Generators")
             else:
                 _scale_cap(n.generators, g_mask, fraction, label="Generators")
+    # ---- STORES (coal/lignite fuel stores etc.) ----
+    if hasattr(n, "stores") and not n.stores.empty:
+        s_mask_name = _coal_like_df(n.stores)
+        s_mask_bus = n.stores["bus"].isin(coal_buses) if "bus" in n.stores else pd.Series(False, index=n.stores.index)
+        s_mask = s_mask_name | s_mask_bus
 
+        if verbose:
+            print(
+                f"[coal phaseout][dbg] Stores masks: "
+                f"name/carrier={int(s_mask_name.sum())}, bus_on_coal_bus={int(s_mask_bus.sum())}, union={int(s_mask.sum())}"
+            )
+
+        if s_mask.any():
+            if per_bus_factors and "bus" in n.stores:
+                s_fac = pd.Series(
+                    [per_bus_factors.get(b, fraction) for b in n.stores["bus"]],
+                    index=n.stores.index,
+                    dtype=float,
+                )
+                _scale_store_cap(n.stores, s_mask, s_fac, label="Stores")
+            else:
+                _scale_store_cap(n.stores, s_mask, fraction, label="Stores")
+                
     # ---- LINKS ----
     if not n.links.empty:
         l_mask_name = _coal_like_df(n.links)
@@ -757,285 +868,6 @@ def disable_grid_expansion_if_limit_hit(n):
 #             # replace renewable time series
 #             n.generators_t.p_max_pu.loc[:, p_max_pu.columns] = p_max_pu
 
-def continuity_merge_after_brownfield(
-    n,
-    year: int,
-    *,
-    merge_generators=True,
-    merge_links=True,
-    gen_key_cols=("carrier", "bus"),
-    link_key_cols=("carrier", "bus0", "bus1"),
-    generator_carriers=None,   # optional whitelist (case-insensitive)
-    link_carriers=None,        # optional whitelist (case-insensitive)
-    set_min_to="p_nom",        # "p_nom" or "max(p_nom_min,p_nom)"
-    verbose=True,
-):
-    """
-    Continuity merge AFTER brownfield import.
-
-    Goals:
-      1) Remove year-template duplicates that represent the same physical asset:
-         - Generators: key=(carrier,bus)
-         - Links:      key=(carrier,bus0,bus1)
-         template := build_year == year
-         inherited := build_year < year
-
-      2) Enforce continuity for inherited assets ONLY:
-         - set p_nom_min to carry previous-year capacity floor
-         - DO NOT change p_nom_extendable / p_nom_max / costs / efficiencies.
-
-    This avoids the 'oil/ror unlocked' problem: no asset is made extendable here.
-    """
-
-    def _norm(x):
-        return x.astype(str).str.strip().str.lower()
-
-    def _norm_set(vals):
-        if vals is None:
-            return None
-        return {str(v).strip().lower() for v in vals}
-
-    gen_whitelist = _norm_set(generator_carriers)
-    link_whitelist = _norm_set(link_carriers)
-
-    def _make_key(df, cols):
-        cols = [c for c in cols if c in df.columns]
-        tmp = df.loc[:, cols].copy()
-        if "carrier" in cols:
-            tmp["carrier"] = _norm(tmp["carrier"])
-        for c in cols:
-            if c != "carrier":
-                tmp[c] = tmp[c].fillna("").astype(str)
-        return pd.Series(list(map(tuple, tmp.values)), index=df.index)
-
-    def _apply_min_floor(df, idx):
-        if idx.empty:
-            return 0
-        if "p_nom" not in df.columns or "p_nom_min" not in df.columns:
-            return 0
-
-        if set_min_to == "p_nom":
-            df.loc[idx, "p_nom_min"] = df.loc[idx, "p_nom"]
-        elif set_min_to == "max(p_nom_min,p_nom)":
-            df.loc[idx, "p_nom_min"] = np.maximum(df.loc[idx, "p_nom_min"], df.loc[idx, "p_nom"])
-        else:
-            raise ValueError("set_min_to must be 'p_nom' or 'max(p_nom_min,p_nom)'")
-        return int(len(idx))
-
-    out = {
-        "gen_dropped": 0,
-        "gen_min_set": 0,
-        "link_dropped": 0,
-        "link_min_set": 0,
-    }
-
-    # ---------------- GENERATORS ----------------
-    if merge_generators and not n.generators.empty:
-        G = n.generators
-
-        required = {"build_year", "carrier", "bus"}
-        if not required.issubset(G.columns):
-            if verbose:
-                print(f"[continuity_merge] generators missing {required - set(G.columns)}, skipping generators")
-        else:
-            mask = pd.Series(True, index=G.index)
-
-            if gen_whitelist is not None:
-                mask &= _norm(G["carrier"]).isin(gen_whitelist)
-
-            gen = G.loc[mask]
-            inherited = gen.index[gen["build_year"] < year]
-            template  = gen.index[gen["build_year"] == year]
-
-            # drop template duplicates (same physical key as any inherited)
-            if len(inherited) and len(template):
-                key_inh = set(_make_key(G.loc[inherited], gen_key_cols).values)
-                key_tpl = _make_key(G.loc[template], gen_key_cols)
-                to_drop = key_tpl.index[key_tpl.isin(key_inh)]
-                if len(to_drop):
-                    n.mremove("Generator", to_drop)
-                    out["gen_dropped"] = int(len(to_drop))
-
-            # re-fetch after removals
-            G = n.generators
-
-            # IMPORTANT: recompute inherited index against updated table
-            # (some inherited might have been removed upstream)
-            inherited = G.index[(G["build_year"] < year)]
-            if gen_whitelist is not None:
-                inherited = inherited[_norm(G.loc[inherited, "carrier"]).isin(gen_whitelist)]
-
-            out["gen_min_set"] = _apply_min_floor(G, inherited)
-
-    # ---------------- LINKS ----------------
-    if merge_links and not n.links.empty:
-        L = n.links
-
-        required = {"build_year", "carrier", "bus0", "bus1"}
-        if not required.issubset(L.columns):
-            if verbose:
-                print(f"[continuity_merge] links missing {required - set(L.columns)}, skipping links")
-        else:
-            mask = pd.Series(True, index=L.index)
-            if link_whitelist is not None:
-                mask &= _norm(L["carrier"]).isin(link_whitelist)
-
-            links = L.loc[mask]
-            inherited = links.index[links["build_year"] < year]
-            template  = links.index[links["build_year"] == year]
-
-            if len(inherited) and len(template):
-                key_inh = set(_make_key(L.loc[inherited], link_key_cols).values)
-                key_tpl = _make_key(L.loc[template], link_key_cols)
-                to_drop = key_tpl.index[key_tpl.isin(key_inh)]
-                if len(to_drop):
-                    n.mremove("Link", to_drop)
-                    out["link_dropped"] = int(len(to_drop))
-
-            # re-fetch after removals
-            L = n.links
-
-            inherited = L.index[(L["build_year"] < year)]
-            if link_whitelist is not None:
-                inherited = inherited[_norm(L.loc[inherited, "carrier"]).isin(link_whitelist)]
-
-            out["link_min_set"] = _apply_min_floor(L, inherited)
-
-    if verbose:
-        print(
-            f"[continuity_merge] year={year} | "
-            f"gen: dropped={out['gen_dropped']}, p_nom_min_set={out['gen_min_set']} | "
-            f"link: dropped={out['link_dropped']}, p_nom_min_set={out['link_min_set']}"
-        )
-
-    return out
-
-
-def _norm_series(s):
-    return s.astype(str).str.strip().str.lower()
-
-def audit_after_continuity_merge(n, year, carriers=("oil", "ror", "run-of-river", "run of river")):
-    """
-    Prints:
-      - summary by carrier (counts, p_nom sums, p_nom_min sums, extendable share)
-      - template-vs-inherited duplicate keys that SURVIVED
-      - inherited duplicates among themselves
-    """
-    carriers_norm = {c.strip().lower() for c in carriers}
-
-    def _make_key(df, cols):
-        cols = [c for c in cols if c in df.columns]
-        tmp = df.loc[:, cols].copy()
-        if "carrier" in cols:
-            tmp["carrier"] = _norm_series(tmp["carrier"])
-        for c in cols:
-            if c != "carrier":
-                tmp[c] = tmp[c].fillna("").astype(str)
-        return pd.Series(list(map(tuple, tmp.values)), index=df.index)
-
-    # ----------------- GENERATORS -----------------
-    if not n.generators.empty and {"carrier","bus","build_year"}.issubset(n.generators.columns):
-        G = n.generators.copy()
-        G["carrier_norm"] = _norm_series(G["carrier"])
-
-        # keep anything whose carrier contains "oil" or "ror" etc (substring helps catch "run-of-river")
-        mask = G["carrier_norm"].apply(lambda x: any(k in x for k in carriers_norm))
-        g = G.loc[mask].copy()
-
-        print("\n=== generators: oil/ror audit ===")
-        if g.empty:
-            print("no matching generator carriers found")
-        else:
-            # summary by carrier
-            def _colsum(df, col):
-                return df[col].sum() if col in df.columns else np.nan
-
-            summ = (g.groupby("carrier_norm")
-                      .apply(lambda df: pd.Series({
-                          "n": len(df),
-                          "sum_p_nom": _colsum(df, "p_nom"),
-                          "sum_p_nom_min": _colsum(df, "p_nom_min"),
-                          "share_extendable": float(df["p_nom_extendable"].mean()) if "p_nom_extendable" in df else np.nan,
-                          "min_build_year": df["build_year"].min(),
-                          "max_build_year": df["build_year"].max(),
-                      }))
-                      .sort_values("sum_p_nom", ascending=False))
-            print(summ)
-
-            # template-vs-inherited duplicates that survived
-            key = _make_key(g, ("carrier", "bus"))
-            inh = g.index[g["build_year"] < year]
-            tpl = g.index[g["build_year"] == year]
-            if len(inh) and len(tpl):
-                key_inh = set(key.loc[inh].values)
-                surv_tpl = key.loc[tpl]
-                survived = surv_tpl.index[surv_tpl.isin(key_inh)]
-                print(f"\n[generators] template duplicates surviving merge: {len(survived)}")
-                if len(survived):
-                    show = g.loc[survived, ["carrier","bus","build_year","p_nom","p_nom_min","p_nom_extendable"]].copy()
-                    print(show.sort_values(["carrier","bus"]).head(40))
-
-            # inherited duplicates among themselves (merge won't fix these)
-            if len(inh):
-                inh_key = key.loc[inh]
-                dup_inh = inh_key[inh_key.duplicated(keep=False)]
-                print(f"[generators] inherited duplicates among themselves: {dup_inh.index.nunique()}")
-                if not dup_inh.empty:
-                    show = g.loc[dup_inh.index, ["carrier","bus","build_year","p_nom","p_nom_min","p_nom_extendable"]]
-                    print(show.sort_values(["carrier","bus","build_year"]).head(60))
-
-    else:
-        print("\n=== generators: skipped (missing columns carrier/bus/build_year or empty) ===")
-
-    # ----------------- LINKS (oil sometimes is here as conversion tech) -----------------
-    if not n.links.empty and {"carrier","bus0","bus1","build_year"}.issubset(n.links.columns):
-        L = n.links.copy()
-        L["carrier_norm"] = _norm_series(L["carrier"])
-
-        mask = L["carrier_norm"].apply(lambda x: any(k in x for k in carriers_norm))
-        l = L.loc[mask].copy()
-
-        print("\n=== links: oil/ror audit ===")
-        if l.empty:
-            print("no matching link carriers found")
-        else:
-            def _colsum(df, col):
-                return df[col].sum() if col in df.columns else np.nan
-
-            summ = (l.groupby("carrier_norm")
-                      .apply(lambda df: pd.Series({
-                          "n": len(df),
-                          "sum_p_nom": _colsum(df, "p_nom"),
-                          "sum_p_nom_min": _colsum(df, "p_nom_min"),
-                          "share_extendable": float(df["p_nom_extendable"].mean()) if "p_nom_extendable" in df else np.nan,
-                          "min_build_year": df["build_year"].min(),
-                          "max_build_year": df["build_year"].max(),
-                      }))
-                      .sort_values("sum_p_nom", ascending=False))
-            print(summ)
-
-            key = _make_key(l, ("carrier", "bus0", "bus1"))
-            inh = l.index[l["build_year"] < year]
-            tpl = l.index[l["build_year"] == year]
-            if len(inh) and len(tpl):
-                key_inh = set(key.loc[inh].values)
-                surv_tpl = key.loc[tpl]
-                survived = surv_tpl.index[surv_tpl.isin(key_inh)]
-                print(f"\n[links] template duplicates surviving merge: {len(survived)}")
-                if len(survived):
-                    show = l.loc[survived, ["carrier","bus0","bus1","build_year","p_nom","p_nom_min","p_nom_extendable"]].copy()
-                    print(show.sort_values(["carrier","bus0","bus1"]).head(40))
-
-            if len(inh):
-                inh_key = key.loc[inh]
-                dup_inh = inh_key[inh_key.duplicated(keep=False)]
-                print(f"[links] inherited duplicates among themselves: {dup_inh.index.nunique()}")
-                if not dup_inh.empty:
-                    show = l.loc[dup_inh.index, ["carrier","bus0","bus1","build_year","p_nom","p_nom_min","p_nom_extendable"]]
-                    print(show.sort_values(["carrier","bus0","bus1","build_year"]).head(60))
-
-    else:
-        print("\n=== links: skipped (missing columns carrier/bus0/bus1/build_year or empty) ===")
 
 
 
@@ -1071,9 +903,6 @@ if __name__ == "__main__":
     n_p = pypsa.Network(snakemake.input.network_p)
     add_brownfield(n, n_p, year)
     lock_oil_electricity_assets(n) 
-    continuity_merge_after_brownfield(n,year)
-    audit_after_continuity_merge(n, year, carriers=("oil","ror","run-of-river","run of river","hydro ror"))
-
     disable_grid_expansion_if_limit_hit(n)
     elec_cfg = snakemake.config.get("electricity", {})
     apply_coal_supplier_phaseout(n, year, elec_cfg, verbose=True)
@@ -1117,6 +946,7 @@ if __name__ == "__main__":
                     print(f"[fix] set {fix.sum()} NaN {df_name}.p_nom_max to inf (extendable assets)")
 
     _fix_nan_p_nom_max(n)
+    _fill_nan_store_p_nom(n, hours_default=1.0, pnom_floor=1.0, make_extendable=True)
 
     _assert_no_nans_in_timeseries(n)
     _assert_component_bounds_sane(n)

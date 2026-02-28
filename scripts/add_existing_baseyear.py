@@ -17,7 +17,7 @@ import pandas as pd
 import powerplantmatching as pm
 import pypsa
 from _helpers import sanitize_carriers, sanitize_locations
-from prepare_sector_network import _assert_no_nans_in_timeseries, _assert_component_bounds_sane
+from prepare_sector_network import _assert_no_nans_in_timeseries,_fill_nan_store_p_nom, _assert_component_bounds_sane
 import xarray as xr
 
 # from _helpers import (
@@ -785,6 +785,8 @@ if __name__ == "__main__":
     )
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
+    _fill_nan_store_p_nom(n, hours_default=1.0, pnom_floor=1.0, make_extendable=True)
+
     _assert_nom_bounds(n, tag=f"after coal phaseout {baseyear}")
     _assert_no_nans_in_timeseries(n)
     _assert_component_bounds_sane(n)

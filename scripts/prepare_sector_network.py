@@ -412,6 +412,8 @@ def add_hydrogen(n, costs):
         nodes_overground + " H2 Store Tank",
         bus=nodes_overground + " H2",
         e_nom_extendable=True,
+        p_nom_extendable=True,
+        p_nom=1.0,              # MW baseline (non-binding, but not zero/NaN)
         e_cyclic=True,
         carrier="H2 Store Tank",
         capital_cost=h2_capital_cost,
@@ -604,8 +606,11 @@ def define_spatial(nodes, options):
 
     spatial.nodes = nodes
 
-    # biomass
+    print("\n===== SPATIAL DEBUG START =====")
+    print("Total base nodes:", len(nodes))
+    print("Sample nodes:", list(nodes)[:5])
 
+    # biomass
     spatial.biomass = SimpleNamespace()
 
     if options["biomass_transport"]:
@@ -621,27 +626,36 @@ def define_spatial(nodes, options):
 
     spatial.biomass.df = pd.DataFrame(vars(spatial.biomass), index=nodes)
 
-    # co2
+    print("\n[BIOMASS]")
+    print("nodes:", len(spatial.biomass.nodes))
+    print("locations:", len(spatial.biomass.locations))
+    print("industry:", len(spatial.biomass.industry))
+    print("industry_cc:", len(spatial.biomass.industry_cc))
+    print("sample nodes:", spatial.biomass.nodes[:3])
+    print("df shape:", spatial.biomass.df.shape)
 
+    # co2
     spatial.co2 = SimpleNamespace()
 
     if options["co2_network"]:
         spatial.co2.nodes = nodes + " co2 stored"
         spatial.co2.locations = nodes
         spatial.co2.vents = nodes + " co2 vent"
-        # spatial.co2.x = (n.buses.loc[list(nodes)].x.values,)
-        # spatial.co2.y = (n.buses.loc[list(nodes)].y.values,)
     else:
         spatial.co2.nodes = ["co2 stored"]
         spatial.co2.locations = ["Earth"]
         spatial.co2.vents = ["co2 vent"]
-        # spatial.co2.x = (0,)
-        # spatial.co2.y = 0
 
     spatial.co2.df = pd.DataFrame(vars(spatial.co2), index=nodes)
 
-    # oil
+    print("\n[CO2]")
+    print("nodes:", len(spatial.co2.nodes))
+    print("locations:", len(spatial.co2.locations))
+    print("vents:", len(spatial.co2.vents))
+    print("sample nodes:", spatial.co2.nodes[:3])
+    print("df shape:", spatial.co2.df.shape)
 
+    # oil
     spatial.oil = SimpleNamespace()
 
     if options["oil"]["spatial_oil"]:
@@ -651,8 +665,12 @@ def define_spatial(nodes, options):
         spatial.oil.nodes = ["Earth oil"]
         spatial.oil.locations = ["Earth"]
 
-    # gas
+    print("\n[OIL]")
+    print("nodes:", len(spatial.oil.nodes))
+    print("locations:", len(spatial.oil.locations))
+    print("sample nodes:", spatial.oil.nodes[:3])
 
+    # gas
     spatial.gas = SimpleNamespace()
 
     if options["gas"]["spatial_gas"]:
@@ -674,8 +692,15 @@ def define_spatial(nodes, options):
 
     spatial.gas.df = pd.DataFrame(vars(spatial.gas), index=spatial.nodes)
 
-    # coal
+    print("\n[GAS]")
+    print("nodes:", len(spatial.gas.nodes))
+    print("locations:", len(spatial.gas.locations))
+    print("biogas:", len(spatial.gas.biogas))
+    print("industry:", len(spatial.gas.industry))
+    print("sample nodes:", spatial.gas.nodes[:3])
+    print("df shape:", spatial.gas.df.shape)
 
+    # coal
     spatial.coal = SimpleNamespace()
 
     if options["coal"]["spatial_coal"]:
@@ -689,8 +714,14 @@ def define_spatial(nodes, options):
 
     spatial.coal.df = pd.DataFrame(vars(spatial.coal), index=spatial.nodes)
 
-    # lignite
+    print("\n[COAL]")
+    print("nodes:", len(spatial.coal.nodes))
+    print("locations:", len(spatial.coal.locations))
+    print("industry:", len(spatial.coal.industry))
+    print("sample nodes:", spatial.coal.nodes[:3])
+    print("df shape:", spatial.coal.df.shape)
 
+    # lignite
     spatial.lignite = SimpleNamespace()
 
     if options["lignite"]["spatial_lignite"]:
@@ -702,15 +733,38 @@ def define_spatial(nodes, options):
 
     spatial.lignite.df = pd.DataFrame(vars(spatial.lignite), index=spatial.nodes)
 
+    print("\n[LIGNITE]")
+    print("nodes:", len(spatial.lignite.nodes))
+    print("locations:", len(spatial.lignite.locations))
+    print("sample nodes:", spatial.lignite.nodes[:3])
+    print("df shape:", spatial.lignite.df.shape)
+
+    print("\n===== SPATIAL DEBUG END =====\n")
+
     return spatial
 
-
 def add_biomass(n, costs):
+    """
+    Biomass + biogas potentials as annual fuel Stores (MWh/a) distributed nodally,
+    plus:
+      - solid biomass -> electricity conversion ("biomass EOP") on electricity buses
+      - optional biogas upgrading (biogas -> gas + CO2)
+      - optional biomass transport
+      - optional CHP (+ optional CHP CC)
+
+    Includes debug prints to verify:
+      - potentials, pathway fraction
+      - created buses/stores/links counts
+      - total e_nom checks
+      - EOP link caps sanity
+    """
     logger.info("adding biomass")
 
-    # 1) annual potentials (TWh -> MWh)
-    biomass_pot = float(snakemake.config["sector"]["solid_biomass_potential"]) * 1e6
-    biogas_pot  = float(snakemake.config["sector"]["biogas_potential"]) * 1e6
+    # -----------------------------
+    # 0) read config + apply pathway
+    # -----------------------------
+    biomass_pot = float(snakemake.config["sector"]["solid_biomass_potential"]) * 1e6  # TWh -> MWh
+    biogas_pot  = float(snakemake.config["sector"]["biogas_potential"]) * 1e6        # TWh -> MWh
 
     sched = snakemake.config["sector"].get("bio_pathway", {})  # {year: frac}
     frac = sched.get(investment_year, sched.get(str(investment_year), 1.0))
@@ -720,35 +774,52 @@ def add_biomass(n, costs):
     biogas_pot  *= frac
 
     print(f"[biomass] bio_pathway frac @ {investment_year} = {frac}")
-    print("[biomass] total potentials [MWh/a]:", biomass_pot, biogas_pot)
+    print(f"[biomass] total potentials [MWh/a]: solid={biomass_pot:.3f}, biogas={biogas_pot:.3f}")
 
+    # -----------------------------
+    # 1) identify electricity buses
+    # -----------------------------
     bus_car = n.buses["carrier"].astype("string").fillna("")
     elec_buses = n.buses.index[bus_car.isin(["AC", "DC"])].astype(str)
 
-    # build nodal biomass buses on *electricity buses*
+    print(f"[biomass] elec buses (AC/DC) count: {len(elec_buses)}")
+    if len(elec_buses) == 0:
+        print("[biomass][WARN] no AC/DC buses found -> biomass buses will be empty unless referenced by links")
+
+    # build nodal biomass buses on electricity buses
     biomass_nodes = pd.Index(elec_buses) + " solid biomass"
 
-    # defensive: also include any solid-biomass buses referenced in links (even if base bus not AC/DC)
+    # defensive: include any " solid biomass" buses referenced in existing links
     link_bus_cols = [c for c in ["bus0", "bus1", "bus2", "bus3", "bus4"] if c in n.links.columns]
     if link_bus_cols and not n.links.empty:
         referenced = pd.Index(
             pd.unique(pd.concat([n.links[c].astype("string") for c in link_bus_cols], axis=0))
         ).dropna()
         referenced = referenced[referenced.astype(str).str.endswith(" solid biomass")]
+        if len(referenced):
+            print(f"[biomass] found referenced solid biomass buses in links: {len(referenced)}")
         biomass_nodes = biomass_nodes.union(referenced.astype(str))
 
     # biogas buses (keep your existing spatial logic)
-    biogas_nodes  = pd.Index(spatial.gas.biogas).astype(str)
+    biogas_nodes = pd.Index(spatial.gas.biogas).astype(str)
+    print(f"[biomass] biogas buses count (spatial.gas.biogas): {len(biogas_nodes)}")
 
-    # carriers (idempotent)
+    # -----------------------------
+    # 2) carriers (idempotent)
+    # -----------------------------
     if "biogas" not in n.carriers.index:
         n.add("Carrier", "biogas")
     if "solid biomass" not in n.carriers.index:
         n.add("Carrier", "solid biomass")
+    if "biomass EOP" not in n.carriers.index:
+        n.add("Carrier", "biomass EOP")
 
-    # add solid biomass buses (only missing)
+    # -----------------------------
+    # 3) add missing buses
+    # -----------------------------
+    # solid biomass buses
     missing_biomass_buses = biomass_nodes.difference(n.buses.index.astype(str))
-    print(missing_biomass_buses)
+    print(f"[biomass] missing solid biomass buses to add: {len(missing_biomass_buses)}")
     if len(missing_biomass_buses):
         base = missing_biomass_buses.str.replace(r" solid biomass$", "", regex=True).astype(str)
         base_buses = n.buses.reindex(base)
@@ -762,8 +833,9 @@ def add_biomass(n, costs):
             y=base_buses.y.fillna(0.0).values,
         )
 
-    # add biogas buses (only missing)
+    # biogas buses
     missing_biogas_buses = biogas_nodes.difference(n.buses.index.astype(str))
+    print(f"[biomass] missing biogas buses to add: {len(missing_biogas_buses)}")
     if len(missing_biogas_buses):
         n.madd(
             "Bus",
@@ -772,46 +844,69 @@ def add_biomass(n, costs):
             carrier="biogas",
         )
 
-    # helper: equal distribution across nodes
+    # -----------------------------
+    # 4) distribute annual potentials across nodes
+    # -----------------------------
     def as_nodal_energy(total_mwh_per_year, nodes):
         nodes = pd.Index(nodes).astype(str)
         if len(nodes) == 0:
             return pd.Series(dtype=float, index=nodes)
         return pd.Series(float(total_mwh_per_year) / len(nodes), index=nodes)
 
-    # distribute across (now possibly expanded) biomass_nodes + biogas_nodes
     biomass_e_nom = as_nodal_energy(biomass_pot, biomass_nodes)  # MWh/a per biomass bus
     biogas_e_nom  = as_nodal_energy(biogas_pot, biogas_nodes)    # MWh/a per biogas bus
 
-    # add stores for solid biomass (only missing)
+    print(f"[biomass] biomass_nodes count used for distribution: {len(biomass_nodes)}")
+    print(f"[biomass] biogas_nodes  count used for distribution: {len(biogas_nodes)}")
+
+    # -----------------------------
+    # 5) add Stores (fuel availability)
+    # -----------------------------
+    # solid biomass stores
     missing_biomass_stores = biomass_nodes.difference(n.stores.index.astype(str))
+    print(f"[biomass] missing solid biomass stores to add: {len(missing_biomass_stores)}")
     if len(missing_biomass_stores):
         s = biomass_e_nom.reindex(missing_biomass_stores).fillna(0.0)
+        if "solid biomass" not in costs.index:
+            print("[biomass][WARN] 'solid biomass' not in costs.index; setting marginal_cost=0.0")
+            mc = 0.0
+        else:
+            mc = float(costs.at["solid biomass", "fuel"])
+
         n.madd(
             "Store",
             missing_biomass_stores,
             bus=missing_biomass_stores,
             carrier="solid biomass",
-            e_nom=s,
-            e_initial=s,
+            e_nom=s.values,
+            e_initial=s.values,
             e_cyclic=False,
-            marginal_cost=costs.at["solid biomass", "fuel"],
+            e_initial_per_period=True,
+            marginal_cost=mc,
         )
     n.stores.loc[n.stores.carrier == "solid biomass", "e_min_pu"] = 0.0
 
-    # add stores for biogas (only missing)
+    # biogas stores
     missing_biogas_stores = biogas_nodes.difference(n.stores.index.astype(str))
+    print(f"[biomass] missing biogas stores to add: {len(missing_biogas_stores)}")
     if len(missing_biogas_stores):
         s = biogas_e_nom.reindex(missing_biogas_stores).fillna(0.0)
+        if "biogas" not in costs.index:
+            print("[biomass][WARN] 'biogas' not in costs.index; setting marginal_cost=0.0")
+            mc = 0.0
+        else:
+            mc = float(costs.at["biogas", "fuel"])
+
         n.madd(
             "Store",
             missing_biogas_stores,
             bus=missing_biogas_stores,
             carrier="biogas",
-            e_nom=s,
-            e_initial=s,
+            e_nom=s.values,
+            e_initial=s.values,
             e_cyclic=False,
-            marginal_cost=costs.at["biogas", "fuel"],
+            e_initial_per_period=True,
+            marginal_cost=mc,
         )
     n.stores.loc[n.stores.carrier == "biogas", "e_min_pu"] = 0.0
 
@@ -824,22 +919,65 @@ def add_biomass(n, costs):
         float(n.stores.loc[n.stores.carrier == "biogas", "e_nom"].sum()),
     )
 
-    # hours in year (effective)
+    # -----------------------------
+    # 6) biomass EOP (solid biomass -> electricity)  [FIXED]
+    # -----------------------------
     H_yr = float(n.snapshot_weightings.generators.sum())
-    pmax_by_bus = (biomass_e_nom / H_yr).fillna(0.0)  # MW_fuel cap per biomass bus
+    print(f"[biomass] H_yr (snapshot_weightings.generators.sum): {H_yr}")
 
-    # add biomass EOP links (indexed by link names)
-    eop_link_names = biogas_nodes + " biomass EOP"
+    if H_yr <= 0:
+        print("[biomass][WARN] H_yr <= 0 -> setting EOP caps to 0.0")
+        pmax_by_biomass_bus = biomass_e_nom.copy() * 0.0
+    else:
+        pmax_by_biomass_bus = (biomass_e_nom / H_yr).fillna(0.0)  # MW_fuel cap per biomass bus
+
+   # only build EOP for biomass buses whose base bus exists as an electricity bus
+    elec_from_biomass = biomass_nodes.str.replace(r" solid biomass$", "", regex=True).astype(str)
+
+    valid_mask = elec_from_biomass.isin(n.buses.index.astype(str))
+    if (~valid_mask).any():
+        bad = elec_from_biomass[~valid_mask]
+        print(f"[biomass][WARN] skipping EOP for non-existent base buses: {len(bad)}")
+        print("[biomass][WARN] sample:", bad[:5].tolist())
+
+    biomass_nodes_eop = biomass_nodes[valid_mask]
+    elec_from_biomass_eop = elec_from_biomass[valid_mask]
+    eop_link_names = elec_from_biomass_eop + " biomass EOP"
+
     p_nom_max_eop = pd.Series(
-        pmax_by_bus.reindex(biogas_nodes + " solid biomass").fillna(0.0).values,
+        pmax_by_biomass_bus.reindex(biomass_nodes_eop).fillna(0.0).values,
         index=eop_link_names,
     )
 
     missing_eop_links = eop_link_names.difference(n.links.index.astype(str))
+    print(f"[biomass] biomass EOP links to add: {len(missing_eop_links)} (total desired: {len(eop_link_names)})")
+
     if len(missing_eop_links):
         ac = missing_eop_links.str.replace(r" biomass EOP$", "", regex=True).astype(str)
+
+        # basic existence checks (debug)
         b0 = ac + " solid biomass"
-        b1 = ac  # electricity bus
+        b1 = ac
+        b0_missing = b0.difference(n.buses.index.astype(str))
+        b1_missing = b1.difference(n.buses.index.astype(str))
+        if len(b0_missing) or len(b1_missing):
+            print(f"[biomass][WARN] EOP bus existence issue: missing bus0={len(b0_missing)}, missing bus1={len(b1_missing)}")
+            if len(b0_missing):
+                print("[biomass][WARN] sample missing bus0:", list(b0_missing[:5]))
+            if len(b1_missing):
+                print("[biomass][WARN] sample missing bus1:", list(b1_missing[:5]))
+
+        if "biomass EOP" not in costs.index:
+            print("[biomass][WARN] 'biomass EOP' not in costs.index; using zero costs + eff=1.0")
+            eff = 1.0
+            capex = 0.0
+            vom = 0.0
+            life = 25.0
+        else:
+            eff  = float(costs.at["biomass EOP", "efficiency"])
+            capex = float(costs.at["biomass EOP", "fixed"])
+            vom  = float(costs.at["biomass EOP", "VOM"])
+            life = float(costs.at["biomass EOP", "lifetime"])
 
         n.madd(
             "Link",
@@ -849,28 +987,41 @@ def add_biomass(n, costs):
             carrier="biomass EOP",
             p_nom_extendable=True,
             p_nom_max=p_nom_max_eop.reindex(missing_eop_links).fillna(0.0).values,
-            efficiency=costs.at["biomass EOP", "efficiency"],
-            capital_cost=costs.at["biomass EOP", "fixed"] * costs.at["biomass EOP", "efficiency"],
-            marginal_cost=costs.at["biomass EOP", "VOM"] * costs.at["biomass EOP", "efficiency"],
-            lifetime=costs.at["biomass EOP", "lifetime"],
+            efficiency=eff,
+            capital_cost=capex,
+            marginal_cost=vom,
+            lifetime=life,
         )
     else:
         # ensure caps are set even if links already exist
         n.links.loc[eop_link_names, "p_nom_max"] = p_nom_max_eop.reindex(eop_link_names).values
 
-    # cap legacy "<bus> biomass" links using matching "<bus> solid biomass"
+    # debug: verify EOP presence + caps
+    n_eop = int((n.links.carrier == "biomass EOP").sum()) if not n.links.empty else 0
+    print(f"[biomass] biomass EOP links in network now: {n_eop}")
+    if n_eop:
+        caps = pd.to_numeric(n.links.loc[n.links.carrier == "biomass EOP", "p_nom_max"], errors="coerce").fillna(0.0)
+        print(f"[biomass] biomass EOP p_nom_max: min={caps.min():.6f}, mean={caps.mean():.6f}, max={caps.max():.6f}")
+
+    # -----------------------------
+    # 7) cap legacy "<bus> biomass" links (optional)
+    # -----------------------------
     legacy = n.links.index[n.links.index.astype(str).str.contains(r" biomass$", regex=True)]
     if len(legacy):
         legacy = pd.Index(legacy).astype(str)
         legacy_bus = legacy.str.replace(r" biomass$", "", regex=True).astype(str)
         legacy_biomass_bus = legacy_bus + " solid biomass"
-        pmax_legacy = (biomass_e_nom.reindex(legacy_biomass_bus).fillna(0.0) / H_yr).values
+        pmax_legacy = (biomass_e_nom.reindex(legacy_biomass_bus).fillna(0.0) / max(H_yr, 1.0)).values
         n.links.loc[legacy, "p_nom_max"] = pmax_legacy
+        print(f"[biomass] capped legacy '* biomass' links: {len(legacy)}")
 
-    # biogas upgrading (ensure bus2 is a real bus name)
+    # -----------------------------
+    # 8) biogas upgrading (biogas -> gas + CO2)
+    # -----------------------------
     if "biogas upgrading" in costs.index or "biogas to gas" in costs.index:
-        # keep your original indexing convention but correct costs row names
         key = "biogas upgrading" if "biogas upgrading" in costs.index else "biogas to gas"
+        print(f"[biomass] adding biogas upgrading links using costs row: '{key}'")
+
         n.madd(
             "Link",
             spatial.gas.biogas_to_gas,
@@ -878,14 +1029,20 @@ def add_biomass(n, costs):
             bus1=spatial.gas.nodes,
             bus2="co2 atmosphere",
             carrier="biogas to gas",
-            capital_cost=costs.loc[key, "fixed"],
-            marginal_cost=costs.loc[key, "VOM"],
-            efficiency2=-costs.at["gas", "CO2 intensity"],
+            capital_cost=float(costs.loc[key, "fixed"]),
+            marginal_cost=float(costs.loc[key, "VOM"]),
+            efficiency2=-float(costs.at["gas", "CO2 intensity"]),
             p_nom_extendable=True,
         )
+    else:
+        print("[biomass] biogas upgrading not added (no matching costs row)")
 
-    # biomass transport
+    # -----------------------------
+    # 9) biomass transport
+    # -----------------------------
     if options.get("biomass_transport", False):
+        print("[biomass] biomass transport enabled")
+
         transport_costs = pd.read_csv(
             snakemake.input.biomass_transport_costs,
             index_col=0,
@@ -918,9 +1075,17 @@ def add_biomass(n, costs):
             carrier="solid biomass transport",
         )
 
-    # CHP part (kept close to your version; avoid global overwrite of caps)
+        print(f"[biomass] biomass transport links added: {len(biomass_transport.index)}")
+    else:
+        print("[biomass] biomass transport disabled")
+
+    # -----------------------------
+    # 10) CHP (optional)
+    # -----------------------------
     urban_central = n.buses.index[n.buses.carrier == "urban central heat"]
     if not urban_central.empty and options.get("chp", False):
+        print(f"[biomass] CHP enabled; urban central heat buses: {len(urban_central)}")
+
         urban_central = urban_central.str[: -len(" urban central heat")]
         key = "central solid biomass CHP"
 
@@ -932,21 +1097,24 @@ def add_biomass(n, costs):
             bus2=urban_central + " urban central heat",
             carrier="urban central solid biomass CHP",
             p_nom_extendable=True,
-            capital_cost=costs.at[key, "fixed"] * costs.at[key, "efficiency"],
-            marginal_cost=costs.at[key, "VOM"],
-            efficiency=costs.at[key, "efficiency"],
-            efficiency2=costs.at[key, "efficiency-heat"],
-            lifetime=costs.at[key, "lifetime"],
+            capital_cost=float(costs.at[key, "fixed"]) * float(costs.at[key, "efficiency"]),
+            marginal_cost=float(costs.at[key, "VOM"]),
+            efficiency=float(costs.at[key, "efficiency"]),
+            efficiency2=float(costs.at[key, "efficiency-heat"]),
+            lifetime=float(costs.at[key, "lifetime"]),
         )
 
         eff_chp = float(costs.at[key, "efficiency"])
-        scalar_cap = (biomass_pot / max(1, len(biomass_nodes))) / (H_yr * eff_chp) if H_yr > 0 else 0.0
+        scalar_cap = (biomass_pot / max(1, len(biomass_nodes))) / (max(H_yr, 1.0) * eff_chp) if H_yr > 0 else 0.0
 
         chp_links = n.links.index[n.links.carrier == "urban central solid biomass CHP"]
         if len(chp_links):
             n.links.loc[chp_links, "p_nom_max"] = scalar_cap
+            print(f"[biomass] CHP links capped (p_nom_max={scalar_cap:.6f}) on {len(chp_links)} links")
 
         if snakemake.config["sector"].get("cc", False):
+            print("[biomass] CHP CC enabled")
+
             n.madd(
                 "Link",
                 urban_central + " urban central solid biomass CHP CC",
@@ -957,33 +1125,48 @@ def add_biomass(n, costs):
                 bus4=spatial.co2.df.loc[urban_central, "nodes"].values,
                 carrier="urban central solid biomass CHP CC",
                 p_nom_extendable=True,
-                capital_cost=costs.at[key, "fixed"] * costs.at[key, "efficiency"]
-                + costs.at["biomass CHP capture", "fixed"] * costs.at["solid biomass", "CO2 intensity"],
-                marginal_cost=costs.at[key, "VOM"],
-                efficiency=costs.at[key, "efficiency"]
-                - costs.at["solid biomass", "CO2 intensity"]
+                capital_cost=float(costs.at[key, "fixed"]) * float(costs.at[key, "efficiency"])
+                + float(costs.at["biomass CHP capture", "fixed"]) * float(costs.at["solid biomass", "CO2 intensity"]),
+                marginal_cost=float(costs.at[key, "VOM"]),
+                efficiency=float(costs.at[key, "efficiency"])
+                - float(costs.at["solid biomass", "CO2 intensity"])
                 * (
-                    costs.at["biomass CHP capture", "electricity-input"]
-                    + costs.at["biomass CHP capture", "compression-electricity-input"]
+                    float(costs.at["biomass CHP capture", "electricity-input"])
+                    + float(costs.at["biomass CHP capture", "compression-electricity-input"])
                 ),
-                efficiency2=costs.at[key, "efficiency-heat"]
-                + costs.at["solid biomass", "CO2 intensity"]
+                efficiency2=float(costs.at[key, "efficiency-heat"])
+                + float(costs.at["solid biomass", "CO2 intensity"])
                 * (
-                    costs.at["biomass CHP capture", "heat-output"]
-                    + costs.at["biomass CHP capture", "compression-heat-output"]
-                    - costs.at["biomass CHP capture", "heat-input"]
+                    float(costs.at["biomass CHP capture", "heat-output"])
+                    + float(costs.at["biomass CHP capture", "compression-heat-output"])
+                    - float(costs.at["biomass CHP capture", "heat-input"])
                 ),
-                efficiency3=-costs.at["solid biomass", "CO2 intensity"]
-                * costs.at["biomass CHP capture", "capture_rate"],
-                efficiency4=costs.at["solid biomass", "CO2 intensity"]
-                * costs.at["biomass CHP capture", "capture_rate"],
-                lifetime=costs.at[key, "lifetime"],
+                efficiency3=-float(costs.at["solid biomass", "CO2 intensity"])
+                * float(costs.at["biomass CHP capture", "capture_rate"]),
+                efficiency4=float(costs.at["solid biomass", "CO2 intensity"])
+                * float(costs.at["biomass CHP capture", "capture_rate"]),
+                lifetime=float(costs.at[key, "lifetime"]),
             )
 
             chpcc_links = n.links.index[n.links.carrier == "urban central solid biomass CHP CC"]
             if len(chpcc_links):
                 n.links.loc[chpcc_links, "p_nom_max"] = scalar_cap
+                print(f"[biomass] CHP CC links capped (p_nom_max={scalar_cap:.6f}) on {len(chpcc_links)} links")
+    else:
+        if options.get("chp", False):
+            print("[biomass][WARN] CHP enabled in options but no 'urban central heat' buses found")
+        else:
+            print("[biomass] CHP disabled")
 
+    # final summary debug
+    print("[biomass] SUMMARY carriers present:", [c for c in ["solid biomass", "biogas", "biomass EOP"] if c in n.carriers.index])
+    print("[biomass] SUMMARY counts:",
+          "buses(solid biomass)=", int((n.buses.carrier == "solid biomass").sum()) if not n.buses.empty else 0,
+          "buses(biogas)=", int((n.buses.carrier == "biogas").sum()) if not n.buses.empty else 0,
+          "stores(solid biomass)=", int((n.stores.carrier == "solid biomass").sum()) if not n.stores.empty else 0,
+          "stores(biogas)=", int((n.stores.carrier == "biogas").sum()) if not n.stores.empty else 0,
+          "links(biomass EOP)=", int((n.links.carrier == "biomass EOP").sum()) if not n.links.empty else 0)
+    
 def co2_cap_from_config(cfg, year):
     el = cfg["electricity"]
     base = float(el.get("co2limit", 0.0))  # cast even if "1e+9" was a string
@@ -1007,6 +1190,40 @@ def co2_cap_from_config(cfg, year):
     print(f"CO2 cap for {y}: {base * frac}")
     return base * frac
 
+def _debug_co2_budget(n, cap, tag=""):
+    """
+    prints how much *fixed* CO2 is being injected into co2 atmosphere via Loads.
+    if this exceeds the capped atmosphere store, you're infeasible.
+    """
+    import numpy as np
+
+    if "co2 atmosphere" not in n.buses.index:
+        print("[co2 debug] no co2 atmosphere bus.")
+        return
+
+    co2_loads = n.loads[n.loads.bus == "co2 atmosphere"] if not n.loads.empty else n.loads.iloc[0:0]
+    if co2_loads.empty:
+        print("[co2 debug] no loads on co2 atmosphere bus.")
+        return
+
+    # snapshot-weighted energy injected (MWh equivalent) over the modeled horizon
+    w = n.snapshot_weightings.generators.reindex(n.snapshots).fillna(1.0)
+    inj = 0.0
+    for name in co2_loads.index:
+        # p_set is time series (MW). Energy = sum(p_set * weight_hours)
+        if name in n.loads_t.p_set.columns:
+            s = n.loads_t.p_set[name].reindex(n.snapshots).fillna(0.0)
+            inj += float((s * w).sum())
+
+    # sign convention: your CO2 loads are often negative for "injection".
+    # we care about net increase of CO2 in atmosphere store -> take negative part magnitude.
+    injected_positive = max(0.0, -inj)
+
+    print(f"\n[co2 debug]{' '+tag if tag else ''}")
+    print(f"  cap (store e_nom): {float(cap):.4g}")
+    print(f"  fixed injected into atmosphere (weighted): {injected_positive:.4g}")
+    if injected_positive > float(cap) + 1e-6:
+        print("  >>> INFEASIBLE LIKELY: fixed CO2 injection exceeds atmosphere cap")
 
 def add_co2(n, costs):
     "add carbon carrier, it's networks and storage units"
@@ -1159,6 +1376,88 @@ def rescale_to_mapping(p_set_series, mapping):
     )
     return factor
 
+def _assert_no_nans_in_timeseries(n):
+    import numpy as np
+
+    # loads
+    if hasattr(n, "loads_t") and hasattr(n.loads_t, "p_set") and not n.loads_t.p_set.empty:
+        if not np.isfinite(n.loads_t.p_set.to_numpy()).all():
+            bad = ~np.isfinite(n.loads_t.p_set.to_numpy())
+            raise ValueError(f"NaN/inf in loads_t.p_set (count={bad.sum()})")
+
+    # generators availability
+    if hasattr(n, "generators_t") and hasattr(n.generators_t, "p_max_pu") and not n.generators_t.p_max_pu.empty:
+        if not np.isfinite(n.generators_t.p_max_pu.to_numpy()).all():
+            bad = ~np.isfinite(n.generators_t.p_max_pu.to_numpy())
+            raise ValueError(f"NaN/inf in generators_t.p_max_pu (count={bad.sum()})")
+
+    # links availability (if present in your version)
+    if hasattr(n, "links_t") and hasattr(n.links_t, "p_max_pu") and not n.links_t.p_max_pu.empty:
+        if not np.isfinite(n.links_t.p_max_pu.to_numpy()).all():
+            bad = ~np.isfinite(n.links_t.p_max_pu.to_numpy())
+            raise ValueError(f"NaN/inf in links_t.p_max_pu (count={bad.sum()})")
+
+
+def _assert_component_bounds_sane(n):
+    def check(df, name):
+        if df.empty:
+            return
+
+        # ---- 1) NaNs are never allowed (inf is fine = unbounded)
+        for col in ["p_nom_min", "p_nom_max", "p_nom"]:
+            if col in df.columns:
+                s = pd.to_numeric(df[col], errors="coerce")
+                if s.isna().any():
+                    bad = df.loc[s.isna()]
+                    raise ValueError(
+                        f"NaN in {name}.{col}\n"
+                        f"{bad.head(20)}"
+                    )
+
+        has_bounds = {"p_nom_min", "p_nom_max", "p_nom_extendable", "p_nom"}.issubset(df.columns)
+
+        if not has_bounds:
+            return
+
+        ext = df.p_nom_extendable.fillna(False).astype(bool)
+
+        pmin = pd.to_numeric(df.p_nom_min, errors="coerce").fillna(0.0)
+        pmax = pd.to_numeric(df.p_nom_max, errors="coerce")
+        pnom = pd.to_numeric(df.p_nom, errors="coerce").fillna(0.0)
+
+        # ---- 2) extendable: p_nom_max must not fall below p_nom_min (finite case)
+        bad_ext = ext & np.isfinite(pmax) & (pmax < pmin - 1e-9)
+
+        if bad_ext.any():
+            raise ValueError(
+                f"{name}: extendable assets with p_nom_max < p_nom_min\n"
+                f"{df.loc[bad_ext].head(20)}"
+            )
+
+        # ---- 3) extendable: p_nom must respect finite p_nom_max
+        bad_ext_nom = ext & np.isfinite(pmax) & (pnom > pmax + 1e-9)
+
+        if bad_ext_nom.any():
+            raise ValueError(
+                f"{name}: extendable assets with p_nom > p_nom_max\n"
+                f"{df.loc[bad_ext_nom].head(20)}"
+            )
+
+        # ---- 4) fixed assets: p_nom must not be below p_nom_min  (THIS CAUGHT YOUR 2040 BUG)
+        bad_fix = (~ext) & (pnom < pmin - 1e-9)
+
+        if bad_fix.any():
+            raise ValueError(
+                f"{name}: fixed assets with p_nom < p_nom_min\n"
+                f"{df.loc[bad_fix].head(20)}"
+            )
+
+    check(n.generators, "generators")
+    check(n.links, "links")
+    check(n.stores, "stores")
+    check(n.storage_units, "storage_units")
+
+
 
 def add_aviation(n, costs):
     """
@@ -1168,14 +1467,22 @@ def add_aviation(n, costs):
     2) keep carrier names unchanged; only fix p_set creation robustness.
     3) CO2 domestic share block kept; iso2 extraction unchanged.
     """
+    sec = options
 
+    corr_aviation = bool(sec.get("correction_aviation", False))
+    ASEAN_corr = float(sec.get("correction_ASEAN", 0.0))
+    
+    dom_av = energy_totals["total domestic aviation"].reindex(countries)
+    intl_av = energy_totals["total international aviation"].reindex(countries)
+    
     if snakemake.config["sector"]["international_bunkers"]:
-        all_aviation = ["total domestic aviation", "total international aviation"]
+        if corr_aviation:
+            intl_av=intl_av.fillna(0.0)*ASEAN_corr
+        aviation_demand = float((dom_av.fillna(0.0) + intl_av.fillna(0.0)).sum())
     else:
-        all_aviation = ["total domestic aviation"]
+        aviation_demand = float(dom_av.sum())
 
-    aviation_demand = energy_totals.loc[countries, all_aviation].sum(axis=1).sum()
-
+    print("[aviation] total aviation demand [TWh/a]:", aviation_demand)
     airports = pd.read_csv(snakemake.input.airports, keep_default_na=False)
     airports = airports[airports.country.isin(countries)]
 
@@ -1450,12 +1757,29 @@ def add_shipping(n, costs):
 
     gadm_layer_id = snakemake.config["build_shape_options"]["gadm_layer_id"]
 
-    if snakemake.config["sector"]["international_bunkers"]:
-        all_navigation = ["total domestic navigation", "total international navigation"]
-    else:
-        all_navigation = ["total domestic navigation"]
+    sec = options
 
-    navigation_demand = energy_totals.loc[countries, all_navigation].sum(axis=1).sum()
+    corr_shipping = bool(sec.get("correction_shipping", False))
+    print(corr_shipping)
+    correction_ASEAN = float(sec.get("correction_ASEAN", 0.0))
+  
+    dom_nav = energy_totals["total domestic navigation"].reindex(countries)
+    intl_nav = energy_totals["total international navigation"].reindex(countries)
+    print(intl_nav.index)
+    
+
+    
+    if snakemake.config["sector"]["international_bunkers"]:
+
+        if corr_shipping:
+            intl_nav= intl_nav * correction_ASEAN
+        
+        navigation_demand = float((dom_nav + intl_nav).sum())
+
+    else:
+        navigation_demand = float(dom_nav.sum())
+
+    print("[shipping] navigation demand [TWh/a]:", navigation_demand)
 
     efficiency = options["shipping_average_efficiency"] / costs.at["fuel cell", "efficiency"]
 
@@ -1592,12 +1916,15 @@ def add_industry(n, costs):
 
     industrial_demand = pd.read_csv(snakemake.input.industrial_demand, index_col=0, header=0)
     industrial_demand = industrial_demand.copy()
-
     # --- scale industry demand by country/year (mapping in MWh/a) ---
     _mapping = load.get("industry", {}).get(investment_year, {})
     if _mapping:
         industrial_demand_sum = industrial_demand.drop(columns=["process emissions"], errors="ignore")
         industrial_demand = industrial_demand * rescale_to_mapping(industrial_demand_sum, _mapping)
+    
+    process_emissions_correction = load.get("process_emissions_correction", {})
+    if process_emissions_correction: 
+        industrial_demand = industrial_demand * process_emissions_correction
 
     # -----------------------------
     # SOLID BIOMASS FOR INDUSTRY
@@ -1811,12 +2138,38 @@ def add_industry(n, costs):
     )
     n.add("Load", "industry oil emissions", bus="co2 atmosphere", carrier="industry oil emissions", p_set=-float(co2_oil))
 
-    # COAL emissions
+    # COAL 
+    # ensure coal carrier/buses exist in your system somewhere (like you do for oil/gas)
+
+    # add coal fuel consumption load (spatial)
     if "coal" not in industrial_demand.columns:
         industrial_demand["coal"] = 0.0
 
-    co2_coal = (pd.to_numeric(industrial_demand["coal"], errors="coerce").fillna(0.0).sum() / 8760.0) * costs.at["coal", "CO2 intensity"]
-    n.add("Load", "industry coal emissions", bus="co2 atmosphere", carrier="industry coal emissions", p_set=-float(co2_coal))
+    coal_p_set = pd.to_numeric(
+        industrial_demand.loc[spatial.nodes, "coal"], errors="coerce"
+    ).fillna(0.0) / 8760.0
+
+    n.madd(
+        "Load",
+        spatial.nodes,
+        suffix=" coal for industry",
+        bus=spatial.coal.nodes,          # you need this analogous to spatial.oil.nodes
+        carrier="coal for industry",
+        p_set=coal_p_set,
+    )
+
+    # add emissions derived from that load (consistent)
+    co2_coal = (
+        n.loads.loc[spatial.nodes + " coal for industry", "p_set"].sum()
+        * costs.at["coal", "CO2 intensity"]
+    )
+    n.add(
+        "Load",
+        "industry coal emissions",
+        bus="co2 atmosphere",
+        carrier="industry coal emissions",
+        p_set=-float(co2_coal),
+    )
 
     # -----------------------------
     # LOW-T HEAT FOR INDUSTRY
@@ -2316,7 +2669,7 @@ def add_heat(n, costs):
                 e_nom_extendable=True,
                 carrier=name + " water tanks",
                 standing_loss=1 - np.exp(-1 / 24 / tes_time_constant_days),
-                #capital_cost=capital_cost,
+                capital_cost=capital_cost,
                 lifetime=costs.at[name_type + " water tank storage", "lifetime"],
             )
 
@@ -2362,7 +2715,7 @@ def add_heat(n, costs):
                 carrier=name + " solar thermal",
                 p_nom_extendable=True,
                 capital_cost=costs.at[name_type + " solar thermal", "fixed"],
-                p_max_pu=solar_thermal[h_nodes[name]],
+                p_max_pu=solar_thermal.reindex(columns=h_nodes[name], fill_value=0.0),
                 lifetime=costs.at[name_type + " solar thermal", "lifetime"],
             )
 
@@ -3194,7 +3547,202 @@ def remove_carrier_related_components(n, carriers_to_drop):
     )
     n.mremove("Link", links_to_remove)
 
+def apply_domestic_share_correction(domestic: pd.Series,
+                                    international: pd.Series,
+                                    *,
+                                    enabled: bool,
+                                    domestic_share: float,
+                                    label: str = "") -> pd.Series:
+    """
+    If enabled and domestic_share>0:
+      - build total = domestic + international
+      - where domestic is <=0 but total>0, set domestic = domestic_share * total
+    Returns corrected domestic series (same index as inputs).
+    """
+    dom = domestic.fillna(0.0).astype(float)
+    intl = international.fillna(0.0).astype(float)
 
+    if not enabled:
+        return dom
+
+    total = dom + intl
+    m = (dom <= 0.0) & (total > 0.0)
+    dom = dom.copy()
+    if domestic_share != 0:
+        dom.loc[m] = domestic_share * total.loc[m]
+        if enabled:
+            logger.info(
+                f"[{label}] domestic share correction applied (share={domestic_share}). "
+                f"replaced={int(m.sum())} entries."
+            )
+    return dom
+
+
+
+def enforce_caps_and_re_potentials(
+    n,
+    *,
+    re_caps_gw=None,
+    group_map=None,
+    carriers_check=None,
+    set_min_equal_nom=True,
+    raise_on_any_inf=False,
+):
+    """
+    1) For non-extendable generators: set p_nom_max = p_nom (and optionally p_nom_min = p_nom).
+    2) For extendable renewable generators: cap total p_nom_max per carrier-group to user caps (GW),
+       by scaling node-level p_nom_max proportionally.
+    3) Raise if any targeted extendable RE has inf/NaN p_nom_max afterwards.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+    re_caps_gw : dict or None
+        e.g. {"solar": 1000, "onwind": 800, "offwind": 300, "solar rooftop": 500}
+        Values are in GW.
+    group_map : dict or None
+        e.g. {"offwind": ["offwind-ac", "offwind-dc"]}
+        If key not in group_map, it is treated as a carrier name itself.
+    carriers_check : list[str] or None
+        Which carriers (or group keys) should be checked for finite p_nom_max on extendables.
+        If None, checks keys from re_caps_gw.
+    set_min_equal_nom : bool
+        If True, sets p_nom_min = p_nom for non-extendables (if column exists).
+    raise_on_any_inf : bool
+        If True, raise if ANY generator has inf/NaN p_nom_max at the end (not just targeted extendables).
+    """
+
+    gens = n.generators
+
+    # ---------- (A) Clean fixed assets ----------
+    fixed = ~gens.p_nom_extendable.astype(bool)
+
+    gens.loc[fixed, "p_nom"] = (
+        pd.to_numeric(gens.loc[fixed, "p_nom"], errors="coerce")
+        .fillna(0.0)
+    )
+
+    gens.loc[fixed, "p_nom_max"] = gens.loc[fixed, "p_nom"]
+
+    if set_min_equal_nom and "p_nom_min" in gens.columns:
+        gens.loc[fixed, "p_nom_min"] = gens.loc[fixed, "p_nom"]
+
+    # ---------- (B) Global RE caps for extendables ----------
+    if group_map is None:
+        group_map = {"offwind": ["offwind-ac", "offwind-dc"]}
+
+    def carriers_for(key):
+        return group_map.get(key, [key])
+
+    if re_caps_gw:
+        for key, cap_gw in re_caps_gw.items():
+            carriers = carriers_for(key)
+            cap_mw = float(cap_gw) * 1e3
+
+            # scale == 0 → interpret as "no cap"
+            if cap_mw <= 0:
+                print(f"[RE cap] {key}: disabled (cap = 0)")
+                continue
+
+
+            m_ext = gens.carrier.isin(carriers) & gens.p_nom_extendable.astype(bool)
+            if not m_ext.any():
+                continue
+
+            pmax = pd.to_numeric(gens.loc[m_ext, "p_nom_max"], errors="coerce")
+            pmax = pmax.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            total = float(pmax.sum())
+
+            print(
+                f"[RE cap] {key}: before = {total/1e3:.2f} GW | "
+                f"target = {cap_mw/1e3:.2f} GW"
+            )
+
+            if total <= 0.0:
+                gens.loc[m_ext, "p_nom_max"] = 0.0
+
+            elif total <= cap_mw:
+                gens.loc[m_ext, "p_nom_max"] = pmax.values
+
+            else:
+                scale = cap_mw / total
+                gens.loc[m_ext, "p_nom_max"] = (pmax * scale).values
+
+            # safety: never cap below already-built optimized capacity
+            if "p_nom_opt" in gens.columns:
+                gens.loc[m_ext, "p_nom_max"] = np.maximum(
+                    gens.loc[m_ext, "p_nom_max"].astype(float),
+                    pd.to_numeric(gens.loc[m_ext, "p_nom_opt"], errors="coerce")
+                      .fillna(0.0)
+                      .astype(float),
+                )
+
+            final_sum = gens.loc[m_ext, "p_nom_max"].sum()
+            print(f"[RE cap] {key}: after  = {final_sum/1e3:.2f} GW\n")
+
+    # ---------- (C) Raise if inf/NaN remains where it matters ----------
+    if carriers_check is None:
+        carriers_check = list((re_caps_gw or {}).keys())
+
+    if carriers_check:
+        carriers_flat = []
+        for key in carriers_check:
+            carriers_flat += carriers_for(key)
+
+        m_chk = gens.p_nom_extendable.astype(bool) & gens.carrier.isin(carriers_flat)
+
+        pmax_chk = pd.to_numeric(gens.loc[m_chk, "p_nom_max"], errors="coerce")
+        bad = ~np.isfinite(pmax_chk.values)
+
+        if bad.any():
+            bad_rows = gens.loc[m_chk].iloc[np.where(bad)[0]][
+                ["carrier", "bus", "p_nom_extendable", "p_nom_max"]
+            ]
+            raise ValueError(
+                "Found non-finite p_nom_max (inf/NaN) for extendable renewables after cap enforcement.\n"
+                f"Sample rows:\n{bad_rows.head(30)}"
+            )
+
+    if raise_on_any_inf:
+        pmax_all = pd.to_numeric(gens["p_nom_max"], errors="coerce")
+        bad_all = ~np.isfinite(pmax_all.values)
+
+        if bad_all.any():
+            bad_rows = gens.iloc[np.where(bad_all)[0]][
+                ["carrier", "bus", "p_nom_extendable", "p_nom_max"]
+            ]
+            raise ValueError(
+                "Found non-finite p_nom_max (inf/NaN) in generators after enforcement.\n"
+                f"Sample rows:\n{bad_rows.head(30)}"
+            )
+
+    return n
+def _fill_nan_store_p_nom(n, hours_default=24.0, pnom_floor=1.0, make_extendable=True):
+    if n.stores.empty:
+        return
+
+    # ensure required columns exist
+    if "p_nom" not in n.stores.columns:
+        n.stores["p_nom"] = np.nan
+    if "p_nom_extendable" not in n.stores.columns:
+        n.stores["p_nom_extendable"] = False
+
+    pnom = pd.to_numeric(n.stores["p_nom"], errors="coerce")
+    nan_mask = pnom.isna()
+    if nan_mask.any():
+        enom = pd.to_numeric(
+            n.stores.get("e_nom", pd.Series(np.nan, index=n.stores.index)),
+            errors="coerce",
+        )
+        default_pnom = (enom / float(hours_default)).clip(lower=float(pnom_floor)).fillna(float(pnom_floor))
+        n.stores.loc[nan_mask, "p_nom"] = default_pnom.loc[nan_mask].values
+
+        if make_extendable:
+            n.stores.loc[nan_mask, "p_nom_extendable"] = True
+
+    # CRITICAL: enforce bool dtype (prevents NetCDF mixed-type object columns)
+    n.stores["p_nom_extendable"] = n.stores["p_nom_extendable"].fillna(False).astype(bool)
 
 
 if __name__ == "__main__":
@@ -3399,10 +3947,7 @@ if __name__ == "__main__":
 
     # ----- Build comparison frame (all in MWh/a) -----
     p_set_df = pd.DataFrame({
-        "ports":     [ports_total_MWh],
-        "airports":  [airports_total_MWh],
         "transport": [transport_total_MWh],
-        "rail":      [rail_total_MWh],
     })
 
     print("Transport!!!!", flush=True)
@@ -3437,6 +3982,27 @@ if __name__ == "__main__":
         existing_capacities, existing_efficiencies, existing_nodes = 0, None, None
 
     add_co2(n, costs)  # TODO add costs
+    cap_cfg = snakemake.config["custom_RE_cap"]
+    if cap_cfg.get("enable", False):
+
+        units = cap_cfg.get("units", "GW").upper()
+        caps = cap_cfg.get("caps", {}) or {}
+
+        # convert units -> GW (function expects GW)
+        if units == "MW":
+            caps_gw = {k: float(v) / 1e3 for k, v in caps.items()}
+        elif units == "GW":
+            caps_gw = {k: float(v) for k, v in caps.items()}
+        else:
+            raise ValueError(f"custom_RE_cap.units must be 'MW' or 'GW', got: {units}")
+
+        enforce_caps_and_re_potentials(
+            n,
+            re_caps_gw=caps_gw,
+            group_map={"offwind": ["offwind-ac", "offwind-dc"]},
+            carriers_check=["solar", "solar rooftop", "onwind", "offwind"],
+            raise_on_any_inf=False,  # strict check is already on extendable RE carriers
+        )
 
     # remove conventional generators built in elec-only model
     remove_elec_base_techs(n)
@@ -3582,20 +4148,27 @@ if __name__ == "__main__":
 
     print(off.groupby("carrier")["p_nom_max"].agg(["count","min","max"]).sort_values("max", ascending=False))
 
-    # add load shedding generators everywhere (very expensive)
-    if "load_shed" not in n.carriers.index:
-        n.add("Carrier", "load_shed")
 
-        n.madd("Generator",
-            n.buses.index,
-            suffix=" load_shed",
-            bus=n.buses.index,
-            carrier="load_shed",
-            p_nom_extendable=True,
-            marginal_cost=1e12)
 
-    # then solve again; if it becomes feasible -> you had supply shortage / congestion
+    _fill_nan_store_p_nom(n, hours_default=24.0, pnom_floor=1.0, make_extendable=True)
+    _assert_no_nans_in_timeseries(n)
+    _assert_component_bounds_sane(n)
+    print("[debug] sanity checks passed: no NaNs/infs, bounds look sane")
 
+    bad = (
+        n.buses.carrier.isna()
+        | n.buses.carrier.astype(str).str.strip().isin(["", "-"])
+    )
+
+    if bad.any():
+        print("❌ buses with invalid carrier detected:\n")
+        print(n.buses.loc[bad, ["carrier"]].head(50))
+        print("\nexample bad bus names:", n.buses.index[bad].tolist()[:50])
+
+        raise RuntimeError(
+            f"{bad.sum()} bus(es) have missing/blank carrier. "
+            "This will corrupt energy-balance grouping — aborting."
+        )
 
 
     n.export_to_netcdf(snakemake.output[0])
