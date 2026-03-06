@@ -1333,12 +1333,16 @@ def add_co2(n, costs):
     # --- after you added the CO2 buses/stores/loads ---
     cap = co2_cap_from_config(snakemake.config, investment_year)
 
-    # the atmosphere store should be a *tally* (never negative, fixed capacity)
-    n.stores.loc["co2 atmosphere", "e_min_pu"] = 0.0           # no negative CO2 in air
+    # atmosphere store is only a bookkeeping reservoir, not the policy cap
+    n.stores.loc["co2 atmosphere", "e_min_pu"] = 0.0
     n.stores.loc["co2 atmosphere", "e_initial"] = 0.0
-    n.stores.loc["co2 atmosphere", "e_nom_extendable"] = False  # fix capacity instead of extend
-    n.stores.loc["co2 atmosphere", "e_nom"] = cap               # hard cap
-    n.stores.loc["co2 atmosphere", "e_nom_max"] = cap           # belt & suspenders
+    n.stores.loc["co2 atmosphere", "e_nom_extendable"] = True
+    n.stores.loc["co2 atmosphere", "e_nom"] = 0.0
+    n.stores.loc["co2 atmosphere", "e_nom_max"] = np.inf
+    if "capital_cost" in n.stores.columns:
+        n.stores.loc["co2 atmosphere", "capital_cost"] = 0.0
+    if "marginal_cost" in n.stores.columns:
+        n.stores.loc["co2 atmosphere", "marginal_cost"] = 0.0
     
     Nyears = float(n.snapshot_weightings.objective.sum()) / 8760.0
     gc_const = float(cap) * Nyears
@@ -1350,17 +1354,19 @@ def add_co2(n, costs):
 
     if mask is not None and mask.any():
         idx = n.global_constraints.index[mask]
-        n.global_constraints.loc[idx, "constant"] = cap
+        n.global_constraints.loc[idx, "constant"] = gc_const
         n.global_constraints.loc[idx, "sense"] = "<="
         if "type" in n.global_constraints.columns:
             n.global_constraints.loc[idx, "type"] = "primary energy"
     else:
-        n.add("GlobalConstraint",
-              "CO2Limit",
-              carrier_attribute="co2_emissions",
-              sense="<=",
-              constant=cap,
-              type="primary energy")
+        n.add(
+            "GlobalConstraint",
+            "CO2Limit",
+            carrier_attribute="co2_emissions",
+            sense="<=",
+            constant=gc_const,
+            type="primary energy",
+        )
 
 def rescale_to_mapping(p_set_series, mapping):
 
