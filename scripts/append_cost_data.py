@@ -78,6 +78,7 @@ if __name__ == "__main__":
     app_costs[["capital_cost", "FOM", "VOM"]] *= get_yearly_currency_exchange_rate(
         "USD", "EUR", 2020
     )
+    app_costs["capital_cost_pre_decline"] = app_costs["capital_cost"]
 
     # Include declining factors
     for t in declining.index:
@@ -102,7 +103,7 @@ if __name__ == "__main__":
         techs = tech if isinstance(tech, list) else [tech]
         for t in techs:
             row_base = base_costs.loc[base_costs.technology == t]
-            FOM = row["FOM"] / row["capital_cost"] * 100
+            FOM = row["FOM"] / row["capital_cost_pre_decline"] * 100
             # Append investement, FOM and VOM costs
             rows.append(
                 {

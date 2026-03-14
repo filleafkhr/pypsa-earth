@@ -47,18 +47,30 @@ def attach_transmission_projects(
 
         elif "new_lines" in path.name:
             logger.info(f"Adding new lines from {path}")
+            df = df.copy()
+            df["from_transmission_project"] = True
+            df["project_file"] = path.name
             n.madd("Line", df.index, **df.to_dict(orient="list"))
 
         elif "new_links" in path.name:
             logger.info(f"Adding new links from {path}")
+            df = df.copy()
+            df["from_transmission_project"] = True
+            df["project_file"] = path.name
             n.madd("Link", df.index, **df.to_dict(orient="list"))
 
         elif "adjust_lines" in path.name:
             logger.info(f"Adjusting lines from {path}")
+            df = df.copy()
+            df["from_transmission_project"] = True
+            df["project_file"] = path.name
             n.lines.update(df)
 
         elif "adjust_links" in path.name:
             logger.info(f"Adjusting links from {path}")
+            df = df.copy()
+            df["from_transmission_project"] = True
+            df["project_file"] = path.name
             n.links.update(df)
 
 
@@ -148,5 +160,7 @@ if __name__ == "__main__":
                 .fillna(0)
                 .astype(bool)
             )
+    mask_lines = n.lines["from_transmission_project"].fillna(False)
+    mask_links = n.links["from_transmission_project"].fillna(False)
 
     n.export_to_netcdf(snakemake.output[0])

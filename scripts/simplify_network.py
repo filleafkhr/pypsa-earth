@@ -1008,13 +1008,49 @@ if __name__ == "__main__":
     hvdc_as_lines = snakemake.params.electricity["hvdc_as_lines"]
     aggregation_strategies = snakemake.params.aggregation_strategies
 
+    if "from_transmission_project" not in n.lines.columns:
+        n.lines["from_transmission_project"] = 0
+    else:
+        n.lines["from_transmission_project"] = (
+            n.lines["from_transmission_project"]
+            .fillna(0)
+            .astype(int)
+        )
+
+    if "from_transmission_project" not in n.links.columns:
+        n.links["from_transmission_project"] = 0
+    else:
+        n.links["from_transmission_project"] = (
+            n.links["from_transmission_project"]
+            .fillna(0)
+            .astype(int)
+        )
+
+    logger.info(
+        "from_transmission_project in lines: %s",
+        n.lines["from_transmission_project"].value_counts(dropna=False).to_dict(),
+    )
+    logger.info(
+        "from_transmission_project in links: %s",
+        n.links["from_transmission_project"].value_counts(dropna=False).to_dict(),
+    )
+    if "project_file" in n.lines.columns:
+        logger.info("Dropping 'project_file' column from lines before clustering.")
+        n.lines = n.lines.drop(columns=["project_file"])
+
+    if "project_file" in n.links.columns:
+        logger.info("Dropping 'project_file' column from links before clustering.")
+        n.links = n.links.drop(columns=["project_file"])
+
     # make line clustering robust: if any merged line is under construction -> cluster is under construction
     update_config_dictionary(
         config_dict=aggregation_strategies,
         parameter_key_to_fill="lines",
-        dict_to_use={"under_construction": "max"},
+        dict_to_use={
+            "under_construction": "max",
+            "from_transmission_project": "max",
+        },
     )
-
 
     # Aggregation strategies must be set for all columns
     update_config_dictionary(

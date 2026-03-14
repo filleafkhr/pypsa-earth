@@ -13,8 +13,8 @@ import pandas as pd
 import pypsa
 import xarray as xr
 from add_existing_baseyear import (
-    add_build_year_to_new_assets,
-    filter_transmission_project_build_year,lock_oil_electricity_assets,_assert_nom_bounds
+    add_build_year_to_new_assets, apply_gas_trade_adjustments,check_and_fix_expansion_limits,fix_pypsa_consistency_warnings,
+    filter_transmission_project_build_year,_assert_nom_bounds
 )
 from prepare_sector_network import _assert_no_nans_in_timeseries, _fill_nan_store_p_nom, _assert_component_bounds_sane
 from _helpers import sanitize_carriers, sanitize_locations
@@ -143,59 +143,6 @@ def apply_storage_country_rules(n, cfg):
 
     print(f"applied {len(rules)} storage_country_rules")
 
-
-def apply_gas_trade_adjustments(n, cfg):
-    if not cfg.get("feature_switches", {}).get("gas_trade_adjustments", False):
-        print("gas_trade_adjustments: OFF")
-        return
-
-    trade = cfg.get("gas_trade", {})
-    importers = list(trade.get("importers", []))
-    exporters = list(trade.get("exporters", []))
-    imp_adj = trade.get("importer_adjustment", {}) or {}
-    exp_adj = trade.get("exporter_adjustment", {}) or {}
-
-    g = n.generators
-    if not g.empty and "carrier" in g.columns:
-        g_country = _country_of(n, g, "FuelGenerator")
-        is_gas_fuel = g.carrier.str.lower().eq("gas")
-
-        if importers and "fuel_marginal_cost_add" in imp_adj:
-            m = is_gas_fuel & g_country.isin(importers)
-            if m.any(): g.loc[m, "marginal_cost"] += float(imp_adj["fuel_marginal_cost_add"])
-
-        if exporters and "fuel_marginal_cost_add" in exp_adj:
-            m = is_gas_fuel & g_country.isin(exporters)
-            if m.any(): g.loc[m, "marginal_cost"] += float(exp_adj["fuel_marginal_cost_add"])
-
-    L = n.links
-    if L.empty: return
-    l_country = _country_of(n, L, "Link")
-    is_ccgt = L.carrier.str.lower().eq("ccgt")
-    is_ocgt = L.carrier.str.lower().eq("ocgt")
-
-    def _apply_link_adjust(countries, adj):
-        if not countries or not adj: return
-        mask_country = l_country.isin(list(countries))
-
-        if "ccgt_vom_add" in adj:
-            m = mask_country & is_ccgt
-            if m.any(): L.loc[m, "marginal_cost"] += float(adj["ccgt_vom_add"])
-        if "ocgt_vom_add" in adj:
-            m = mask_country & is_ocgt
-            if m.any(): L.loc[m, "marginal_cost"] += float(adj["ocgt_vom_add"])
-
-        if "ccgt_capex_mult" in adj:
-            m = mask_country & is_ccgt
-            if m.any(): L.loc[m, "capital_cost"] *= float(adj["ccgt_capex_mult"])
-        if "ocgt_capex_mult" in adj:
-            m = mask_country & is_ocgt
-            if m.any(): L.loc[m, "capital_cost"] *= float(adj["ocgt_capex_mult"])
-
-    _apply_link_adjust(importers, imp_adj)
-    _apply_link_adjust(exporters, exp_adj)
-
-    print("applied gas_trade_adjustments")
 
 def apply_coal_supplier_phaseout(n, year, elec_cfg, per_bus_factors=None, verbose=True):
     """
@@ -902,8 +849,9 @@ if __name__ == "__main__":
 
     n_p = pypsa.Network(snakemake.input.network_p)
     add_brownfield(n, n_p, year)
-    lock_oil_electricity_assets(n) 
     disable_grid_expansion_if_limit_hit(n)
+    check_and_fix_expansion_limits(n)
+    n = fix_pypsa_consistency_warnings(n, verbose=True) 
     elec_cfg = snakemake.config.get("electricity", {})
     apply_coal_supplier_phaseout(n, year, elec_cfg, verbose=True)
     apply_gas_trade_adjustments(n, snakemake.config)

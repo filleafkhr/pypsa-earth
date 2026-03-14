@@ -32,6 +32,55 @@ logger = logging.getLogger(__name__)
 cc = coco.CountryConverter()
 idx = pd.IndexSlice
 spatial = SimpleNamespace()
+
+
+def apply_gas_trade_adjustments(n, cfg):
+    if not cfg.get("feature_switches", {}).get("gas_trade_adjustments", False):
+        print("gas_trade_adjustments: OFF")
+        return
+
+    trade = cfg.get("gas_trade", {})
+    importers = list(trade.get("importers", []))
+    exporters = list(trade.get("exporters", []))
+    imp_adj = trade.get("importer_adjustment", {}) or {}
+    exp_adj = trade.get("exporter_adjustment", {}) or {}
+
+    print("importers:", importers)
+    print("exporters:", exporters)
+    print("importer adjustment:", imp_adj)
+    print("exporter adjustment:", exp_adj)
+
+    g = n.generators
+
+    if not g.empty and "carrier" in g.columns:
+        g_country = g["bus"].str[:2]
+        is_gas_fuel = g["carrier"].str.lower().eq("gas")
+
+        print("\nunique gas countries:")
+        print(sorted(g.loc[is_gas_fuel, "bus"].str[:2].unique()))
+
+        print("\nGas generators BEFORE adjustment:")
+        print(g.loc[is_gas_fuel, ["bus", "carrier", "marginal_cost"]].head(20))
+
+        if importers and "fuel_marginal_cost_mult" in imp_adj:
+            m = is_gas_fuel & g_country.isin(importers)
+            print("\nImporter mask count:", m.sum())
+            print(g.loc[m, ["bus", "carrier", "marginal_cost"]].head(20))
+            if m.any():
+                g.loc[m, "marginal_cost"] = g.loc[m, "marginal_cost"] * float(imp_adj["fuel_marginal_cost_mult"])
+
+        if exporters and "fuel_marginal_cost_mult" in exp_adj:
+            m = is_gas_fuel & g_country.isin(exporters)
+            print("\nExporter mask count:", m.sum())
+            print(g.loc[m, ["bus", "carrier", "marginal_cost"]].head(20))
+            if m.any():
+                g.loc[m, "marginal_cost"] = g.loc[m, "marginal_cost"] * float(exp_adj["fuel_marginal_cost_mult"])
+
+        print("\nGas generators AFTER adjustment:")
+        print(g.loc[is_gas_fuel, ["bus", "carrier", "marginal_cost"]].head(20))
+
+    print("applied gas_trade_adjustments")
+
 def _assert_nom_bounds(n, tag=""):
     """
     hard-fail if any extendable asset has p_nom_min > p_nom_max
@@ -640,45 +689,98 @@ def filter_transmission_project_build_year(n, params, year):
         n.mremove("Line", lines.index)
 
 
-def lock_oil_electricity_assets(n):
-    # what we consider "electricity-side" buses
-    elec_bus_carriers = {"AC", "DC", "low voltage"}
-    elec_buses = n.buses.index[n.buses.carrier.isin(elec_bus_carriers)]
-
-    # -----------------
-    # 1) Oil Generators that inject into AC/DC/low voltage
-    # -----------------
-    if "carrier" in n.generators.columns and "bus" in n.generators.columns:
-        gmask = (
-            (n.generators.carrier.astype(str).str.lower() == "oil")
-            & (n.generators.bus.isin(elec_buses))
+def check_and_fix_expansion_limits(n):
+    invalid_lines = n.lines["s_nom_max"] < n.lines["s_nom_min"]
+    if invalid_lines.any():
+        print(f"[check] fixing {invalid_lines.sum()} lines where s_nom_max < s_nom_min")
+        n.lines.loc[invalid_lines, "s_nom_max"] = n.lines.loc[invalid_lines, "s_nom_min"]
+    invalid_links = n.links["p_nom_max"] < n.links["p_nom_min"]
+    if invalid_links.any():
+        print(f"[check] fixing {invalid_links.sum()} links where p_nom_max < p_nom_min")
+        n.links.loc[invalid_links, "p_nom_max"] = n.links.loc[invalid_links, "p_nom_min"]
+    bad_lines = n.lines[n.lines["s_nom_max"] < n.lines["s_nom_min"]]
+    if not bad_lines.empty:
+        print("[debug] lines still invalid after repair:")
+        print(
+            bad_lines[
+                ["bus0", "bus1", "s_nom", "s_nom_min", "s_nom_max", "s_nom_extendable"]
+            ]
         )
-        if gmask.any():
-            # freeze capacity at existing p_nom
-            n.generators.loc[gmask, "p_nom_extendable"] = False
-            n.generators.loc[gmask, "p_nom_min"] = n.generators.loc[gmask, "p_nom"]
-            n.generators.loc[gmask, "p_nom_max"] = n.generators.loc[gmask, "p_nom"]
+    else:
+        print("[debug] all line limits are consistent")
 
-            logger.info(
-                f"Locked {gmask.sum()} oil electricity Generators as non-extendable."
-            )
-
-    # -----------------
-    # 2) Oil Links that output to AC/DC/low voltage (bus1 is usually the output)
-    # -----------------
-    if "carrier" in n.links.columns and "bus1" in n.links.columns:
-        lmask = (
-            (n.links.carrier.astype(str).str.lower() == "oil")
-            & (n.links.bus1.isin(elec_buses))
+    bad_links = n.links[n.links["p_nom_max"] < n.links["p_nom_min"]]
+    if not bad_links.empty:
+        print("[debug] links still invalid after repair:")
+        print(
+            bad_links[
+                ["bus0", "bus1", "p_nom", "p_nom_min", "p_nom_max", "p_nom_extendable"]
+            ]
         )
-        if lmask.any():
-            n.links.loc[lmask, "p_nom_extendable"] = False
-            n.links.loc[lmask, "p_nom_min"] = n.links.loc[lmask, "p_nom"]
-            n.links.loc[lmask, "p_nom_max"] = n.links.loc[lmask, "p_nom"]
+    else:
+        print("[debug] all link limits are consistent")
 
-            logger.info(
-                f"Locked {lmask.sum()} oil electricity Links as non-extendable."
-            )
+
+def fix_pypsa_consistency_warnings(n, verbose=True):
+    """
+    Fill common NaNs that trigger PyPSA consistency warnings.
+    Safe for PyPSA / PyPSA-Earth style networks.
+    """
+
+    # -----------------------------
+    # 1) BUS COORDINATES: x, y
+    # -----------------------------
+    # If x/y are missing, try to copy from lon/lat
+    if "x" not in n.buses.columns:
+        n.buses["x"] = np.nan
+    if "y" not in n.buses.columns:
+        n.buses["y"] = np.nan
+
+    if "lon" in n.buses.columns:
+        n.buses["x"] = n.buses["x"].fillna(n.buses["lon"])
+    if "lat" in n.buses.columns:
+        n.buses["y"] = n.buses["y"].fillna(n.buses["lat"])
+
+    # Optional fallback: if still missing, use 0.0
+    # Better than NaN if you just want warnings gone,
+    # but ideally every bus should have real coordinates.
+    n.buses["x"] = n.buses["x"].fillna(0.0)
+    n.buses["y"] = n.buses["y"].fillna(0.0)
+
+    # -----------------------------
+    # 2) LINE OPTIONAL COLUMNS
+    # -----------------------------
+    # terrain_factor: typically multiplicative cost factor
+    if "terrain_factor" in n.lines.columns:
+        n.lines["terrain_factor"] = n.lines["terrain_factor"].fillna(1.0)
+
+    # angle bounds: if unused, wide defaults are fine
+    if "v_ang_min" in n.lines.columns:
+        n.lines["v_ang_min"] = n.lines["v_ang_min"].fillna(-np.pi)
+
+    if "v_ang_max" in n.lines.columns:
+        n.lines["v_ang_max"] = n.lines["v_ang_max"].fillna(np.pi)
+
+    # module size for line expansion; 0.0 is usually okay if not using modular expansion
+    if "s_nom_mod" in n.lines.columns:
+        n.lines["s_nom_mod"] = n.lines["s_nom_mod"].fillna(0.0)
+
+    # -----------------------------
+    # 3) DEBUG PRINTS
+    # -----------------------------
+    if verbose:
+        bus_nan_x = n.buses["x"].isna().sum() if "x" in n.buses.columns else None
+        bus_nan_y = n.buses["y"].isna().sum() if "y" in n.buses.columns else None
+
+        print("after cleanup:")
+        print(f"  buses with NaN x: {bus_nan_x}")
+        print(f"  buses with NaN y: {bus_nan_y}")
+
+        for col in ["terrain_factor", "v_ang_min", "v_ang_max", "s_nom_mod"]:
+            if col in n.lines.columns:
+                print(f"  lines with NaN {col}: {n.lines[col].isna().sum()}")
+
+    return n
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -734,7 +836,6 @@ if __name__ == "__main__":
     add_power_capacities_installed_before_baseyear(
         n, grouping_years_power, costs, baseyear
     )
-    lock_oil_electricity_assets(n) 
     coal_gen = n.generators[n.generators.carrier.str.contains("coal", case=False, na=False)]
     coal_link = n.links[n.links.carrier.str.contains("coal", case=False, na=False)]
 
@@ -783,6 +884,7 @@ if __name__ == "__main__":
         snakemake.params.transmission_projects,
         baseyear,
     )
+    apply_gas_trade_adjustments(n, snakemake.config)
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
     _fill_nan_store_p_nom(n, hours_default=1.0, pnom_floor=1.0, make_extendable=True)
@@ -791,5 +893,6 @@ if __name__ == "__main__":
     _assert_no_nans_in_timeseries(n)
     _assert_component_bounds_sane(n)
     print("[debug] sanity checks passed: no NaNs/infs, bounds look sane")
-
+    check_and_fix_expansion_limits(n)
+    n = fix_pypsa_consistency_warnings(n, verbose=True)
     n.export_to_netcdf(snakemake.output[0])

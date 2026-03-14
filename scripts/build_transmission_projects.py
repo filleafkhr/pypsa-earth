@@ -268,7 +268,6 @@ def find_closest_lines(lines, new_lines, distance_upper_bound=0.1, type="new"):
                 logger.warning(
                     "Found new lines similar to existing lines:\n"
                     + str(line_map["existing_line"].to_dict())
-                    + "\n Lines are assumed to be duplicated and will be ignored."
                 )
     elif type == "upgraded":
         if len(found_i) < len(new_lines):
@@ -427,7 +426,7 @@ def remove_projects_outside_countries(lines, region_shape):
     """
     region_shape_prepped = shapely.prepared.prep(region_shape)
     is_within_covered_countries = lines["geometry"].apply(
-        lambda x: region_shape_prepped.contains(x)
+        lambda x: x.intersects(region_shape)
     )
 
     if not is_within_covered_countries.all():
@@ -501,13 +500,102 @@ def add_projects(
                 distance_upper_bound=distance_upper_bound,
                 type="new",
             )
-            new_lines = new_lines.drop(duplicate_lines.index, errors="ignore")
-            new_lines_df = pd.concat([new_lines_df, new_lines])
-            # add new lines to network to be able to find added duplicates
-            # n.add("Line", new_lines.index, **new_lines)
-            new_lines_df["dc"] = 0
-            new_lines_df["underwater_fraction"] = 0.0  # only relevant for dc
-            n.madd("Line", new_lines.index, **new_lines.to_dict(orient="list"))
+            truly_new = new_lines.drop(duplicate_lines.index, errors="ignore").copy()
+
+            if not truly_new.empty:
+                truly_new["dc"] = 0
+                truly_new["underwater_fraction"] = 0.0
+                new_lines_df = pd.concat([new_lines_df, truly_new])
+
+                # add to temporary network for later matching
+                n.madd("Line", truly_new.index, **truly_new.to_dict(orient="list"))
+
+            matched_replacements = new_lines.loc[duplicate_lines.index].copy()
+
+            if not matched_replacements.empty:
+                logger.warning(
+                    "Found new lines similar to existing lines and treating them as replacements:\n"
+                    + str(duplicate_lines.to_dict())
+                )
+
+                # create unique replacement names based on existing line
+                duplicate_df = pd.DataFrame({
+                    "project_line": duplicate_lines.index,
+                    "existing_line": duplicate_lines.values
+                })
+
+                duplicate_df["rep_no"] = duplicate_df.groupby("existing_line").cumcount() + 1
+                duplicate_df["new_index"] = (
+                    duplicate_df["existing_line"].astype(str)
+                    + "_"
+                    + duplicate_df["rep_no"].astype(str)
+                )
+
+                # rename matched project lines to e.g. 53_1, 53_2, 53_3
+                rename_map = dict(zip(duplicate_df["project_line"], duplicate_df["new_index"]))
+                matched_replacements = matched_replacements.rename(index=rename_map)
+
+                # map replacement entry -> original existing line
+                line_map = pd.Series(
+                    duplicate_df["existing_line"].values,
+                    index=duplicate_df["new_index"].values
+                )
+
+                # decommission each original old line only once
+                adjust_index = pd.Index(pd.unique(duplicate_df["existing_line"]), name="Line")
+                lines_to_adjust = pd.DataFrame(index=adjust_index)
+                lines_to_adjust["build_year"] = 1990
+
+                # choose earliest replacement build year per original line
+                build_year_map = (
+                    pd.DataFrame({
+                        "existing_line": duplicate_df["existing_line"].values,
+                        "build_year": [
+                            matched_replacements.loc[new_idx, "build_year"]
+                            for new_idx in duplicate_df["new_index"].values
+                        ]
+                    })
+                    .groupby("existing_line")["build_year"]
+                    .min()
+                )
+
+                lines_to_adjust["lifetime"] = build_year_map.loc[lines_to_adjust.index].values - 1990
+                adjust_lines_df = pd.concat([adjust_lines_df, lines_to_adjust])
+
+                # build replacement lines from existing line template + project attributes
+                replacement_lines = []
+
+                for new_idx, existing_idx in line_map.items():
+                    proj = matched_replacements.loc[new_idx].copy()
+                    existing = n.lines.loc[existing_idx].copy()
+
+                    updated = existing.copy()
+
+                    # overwrite existing attributes with project attributes
+                    for col in proj.index:
+                        updated[col] = proj[col]
+
+                    updated.name = new_idx
+                    updated["dc"] = 0
+                    updated["underwater_fraction"] = 0.0
+                    updated["under_construction"] = (
+                        updated.get("project_status", "confirmed") != "existing"
+                    )
+
+                    replacement_lines.append(updated)
+
+                if replacement_lines:
+                    replacement_lines = pd.DataFrame(replacement_lines)
+
+                    if "underground" in replacement_lines.columns:
+                        replacement_lines["underground"] = replacement_lines["underground"].astype("boolean")
+
+                    new_lines_df = pd.concat([new_lines_df, replacement_lines])
+
+                    logger.info(
+                        "Replacement lines added: "
+                        + ", ".join(replacement_lines.index.astype(str))
+                    )
         elif key == "new_links":
             new_links, new_buses_df = connect_new_lines(
                 lines,
@@ -649,7 +737,7 @@ if __name__ == "__main__":
     adjust_links_df = pd.DataFrame()
     new_buses_df = pd.DataFrame()
 
-    region_shape = remove_holes(gpd.read_file(snakemake.input.region_shape).geometry[0])
+    region_shape = remove_holes(gpd.read_file(snakemake.input.country_shapes).geometry.unary_union)
     country_shapes = gpd.read_file(snakemake.input.country_shapes).rename(
         columns={"name": "country"}
     )

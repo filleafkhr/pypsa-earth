@@ -310,27 +310,56 @@ def enforce_autarky(n, only_crossborder=False):
     n.mremove("Link", links_rm)
 
 
-def set_line_nom_max(n, s_nom_max_set=np.inf, p_nom_max_set=np.inf):
-    # Lines: scale or clip
-    if not np.isinf(s_nom_max_set):
-        n.lines["s_nom_max"] = np.where(
-            n.lines["s_nom"] > 0,
-            n.lines["s_nom"] * s_nom_max_set,
-            np.inf  # keep as inf if base capacity is 0
-        )
-    else:
-        n.lines["s_nom_max"] = n.lines["s_nom_max"].clip(upper=s_nom_max_set)
+def set_line_nom_max(n, s_nom_max_set=np.inf, p_nom_max_set=np.inf, print_changes=True):
+    line_mask = (
+        n.lines["from_transmission_project"].fillna(0).astype(float).eq(1)
+        if "from_transmission_project" in n.lines.columns
+        else pd.Series(False, index=n.lines.index)
+    )
 
-    # Links: scale or clip
-    if not np.isinf(p_nom_max_set):
-        n.links["p_nom_max"] = np.where(
-            n.links["p_nom"] > 0,
-            n.links["p_nom"] * p_nom_max_set,
-            np.inf
-        )
-    else:
-        n.links["p_nom_max"] = n.links["p_nom_max"].clip(upper=p_nom_max_set)
+    link_mask = (
+        n.links["from_transmission_project"].fillna(0).astype(float).eq(1)
+        if "from_transmission_project" in n.links.columns
+        else pd.Series(False, index=n.links.index)
+    )
 
+    changed_lines = pd.DataFrame(index=n.lines.index[line_mask])
+    changed_links = pd.DataFrame(index=n.links.index[link_mask])
+
+    if line_mask.any() and not np.isinf(s_nom_max_set):
+        changed_lines["s_nom"] = n.lines.loc[line_mask, "s_nom"]
+        changed_lines["s_nom_max_before"] = n.lines.loc[line_mask, "s_nom_max"]
+
+        n.lines.loc[line_mask, "s_nom_max"] = np.where(
+            n.lines.loc[line_mask, "s_nom"].fillna(0) > 0,
+            n.lines.loc[line_mask, "s_nom"] * s_nom_max_set,
+            0.0,
+        )
+        changed_lines["s_nom_max_after"] = n.lines.loc[line_mask, "s_nom_max"]
+
+    if link_mask.any() and not np.isinf(p_nom_max_set):
+        changed_links["p_nom"] = n.links.loc[link_mask, "p_nom"]
+        changed_links["p_nom_max_before"] = n.links.loc[link_mask, "p_nom_max"]
+
+        n.links.loc[link_mask, "p_nom_max"] = np.where(
+            n.links.loc[link_mask, "p_nom"].fillna(0) > 0,
+            n.links.loc[link_mask, "p_nom"] * p_nom_max_set,
+            0.0,
+        )
+
+        changed_links["p_nom_max_after"] = n.links.loc[link_mask, "p_nom_max"]
+
+    if print_changes:
+        print("\n=== changed project lines ===")
+        if changed_lines.empty:
+            print("none")
+        else:
+            print(changed_lines.to_string())
+        print("\n=== changed project links ===")
+        if changed_links.empty:
+            print("none")
+        else:
+            print(changed_links.to_string())
 
 
 if __name__ == "__main__":
@@ -395,7 +424,7 @@ if __name__ == "__main__":
                 try:
                     year = int(snakemake.wildcards.planning_horizons)
                 except AttributeError:
-                    year = snakemake.params.get("prediction_year", 2050)
+                    year = snakemake.params.get("prediction_year", 2030)
 
                 co2base = float(snakemake.params.electricity["co2base"])
                 use_relative = snakemake.params.electricity.get("use_relative_targets", False)
@@ -414,7 +443,7 @@ if __name__ == "__main__":
                     year = int(snakemake.wildcards.planning_horizons)
                     print(year)
                 except AttributeError:
-                    year = snakemake.params.get("prediction_year", 2050)
+                    year = snakemake.params.get("prediction_year", 2030)
                 co2base = float(snakemake.params.electricity["co2limit"])
                 use_relative = snakemake.params.electricity.get("use_relative_targets", False)
                 relative_targets = snakemake.params.electricity.get("co2_relative_targets", {})
@@ -426,7 +455,7 @@ if __name__ == "__main__":
                     
                 else:
                     co2limit =  co2base
-                   
+            print(f"CO2 limit: {co2limit}")
             add_co2limit(n, co2limit, Nyears)
             break
 

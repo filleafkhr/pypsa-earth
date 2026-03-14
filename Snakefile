@@ -332,7 +332,8 @@ rule build_transmission_projects:
     input:
         base_network="networks/" + RDIR + "base.nc",
         offshore_shapes="resources/" + RDIR + "shapes/offshore_shapes.geojson",
-        ASEAN_shape="resources/" + RDIR + "shapes/country_shapes.geojson",
+        region_shape="resources/" + RDIR + "shapes/africa_shape.geojson",
+        country_shapes="resources/" + RDIR + "shapes/country_shapes.geojson",
         transmission_projects=lambda w: [
             "data/transmission_projects/" + name
             for name, include in config["transmission_projects"]["include"].items()
@@ -545,24 +546,24 @@ if config["enable"].get("retrieve_cost_data", True):
             mem_mb=5000,
         run:
             move(input[0], output[0])
-
-    rule append_cost_data:
-        params:
-            discount_rate=config["costs"]["discountrate"],
-            regional_factor=config["costs"].get("regional_factor"),
-        input:
-            costs="resources/" + RDIR + "pre_costs_{year}.csv",
-            app_costs="data/AEO8-input/AEO8_Table_D15_Cost_Summary.csv",
-            declining_factor="data/AEO8-input/AEO8_Table_D17_Declining_Factor.csv",
-            regional_factor="data/AEO8-input/AEO8_Table_D18_Regional_Factor.csv",
-        output:
-            "resources/" + RDIR + "costs_{year}.csv",
-        log:
-            "logs/" + RDIR + "append_cost_data_{year}.log",
-        resources:
-            mem_mb=3000,
-        script:
-            "scripts/append_cost_data.py"
+    if config["costs"].get("append_cost_data"):
+        rule append_cost_data:
+            params:
+                discount_rate=config["costs"]["discountrate"],
+                regional_factor=config["costs"].get("regional_factor"),
+            input:
+                costs="resources/" + RDIR + "pre_costs_{year}.csv",
+                app_costs="data/AEO8-input/AEO8_Table_D15_Cost_Summary.csv",
+                declining_factor="data/AEO8-input/AEO8_Table_D17_Declining_Factor.csv",
+                regional_factor="data/AEO8-input/AEO8_Table_D18_Regional_Factor.csv",
+            output:
+                "resources/" + RDIR + "costs_{year}.csv",
+            log:
+                "logs/" + RDIR + "append_cost_data_{year}.log",
+            resources:
+                mem_mb=3000,
+            script:
+                "scripts/append_cost_data.py"
 
 
 rule build_demand_profiles:

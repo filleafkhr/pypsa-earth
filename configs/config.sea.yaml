@@ -8,7 +8,7 @@ countries: [BN, KH, ID, LA, MY, MM, PH, SG, TH, VN]
 
 enable:
   retrieve_databundle: false 
-  retrieve_databundle_sector: false
+  retrieve_databundle_sector: true
   retrieve_cost_data: true 
   download_osm_data: false 
   build_natura_raster: false 
@@ -156,14 +156,14 @@ load_options:
 
 
 electricity:
-  co2limit: 1e+9 #1e+9 20% #AEO6
+  co2limit: 6.748633e+08 #2020
   use_relative_targets: true
   co2_relative_targets:
-    2030: 2 #1.8504  # 2,215.2 Mt CO2-eq in 2022
-    2035: 1.5
-    2040: 1
+    2030: 1.25 
+    2035: 1
+    2040: 0.75
     2045: 0.5
-    2050: 0
+    2050: 0.25
   powerplants_filter: "(DateOut >= 2030) or (DateOut != DateOut)" 
   extendable_carriers:
     Generator: [solar, onwind, offwind-ac, offwind-dc, OCGT, CCGT]
@@ -181,24 +181,18 @@ electricity:
       min_age: 10
 
 lines:
-  s_nom_max: 2
+  s_nom_max: 1 #2
 
 links:
-  p_nom_max: 2
+  p_nom_max: 1
 
 costs: 
   year: 2050
   discountrate: [0.05] 
-  # for scenario
-  #override:
-    #marginal_cost:
-      #solar: 10
-      #onwind: 1
-      #offwind: 1
   
-fossil_reserves:
-  oil: 19212.76 #TWh 11.8 billion bbo
-  coal: 65651.8 #9,408.4 million tons (Mt), 6000 kcal/kg = 6.978 megawatt-hours (MWh)/ton
+#fossil_reserves:
+  #oil: 19212.76 #TWh 11.8 billion bbo
+  #coal: 65651.8 #9,408.4 million tons (Mt), 6000 kcal/kg = 6.978 megawatt-hours (MWh)/ton
   #gas: 10000 #todo look for values
 
 export:
@@ -260,6 +254,9 @@ sector:
   lignite:
     spatial_lignite: true
 
+feature_switches:
+  gas_trade_adjustments: True 
+
 focus_weights:
   BN: 0.0
   KH: 0.046396
@@ -285,10 +282,14 @@ focus_weights:
 transmission_projects:
   enable: true
   include:
-    EO8 - Final: true
+    EO8 - Complete: true
+    ID-Supergrid: true
   status:
   - in_planning
   - under_consideration
   - existing
   new_link_capacity: keep #keep or zero
+  distance_upper_bound: 0.3
+  set_by_build_year: true
+  delay_construction: 0
 

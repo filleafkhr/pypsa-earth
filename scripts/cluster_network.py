@@ -712,7 +712,13 @@ if __name__ == "__main__":
         update_config_dictionary(
             config_dict=aggregation_strategies,
             parameter_key_to_fill="lines",
-            dict_to_use={"v_nom": "first", "geometry": "first", "bounds": "first"},
+            dict_to_use={
+                "v_nom": "first",
+                "geometry": "first",
+                "bounds": "first",
+                "s_nom_mod": "first",
+                "from_transmission_project":"max",
+            },
         )
         update_config_dictionary(
             config_dict=aggregation_strategies,

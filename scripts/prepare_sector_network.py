@@ -66,18 +66,6 @@ def add_carrier_buses(n, carrier, nodes=None):
 
     n.madd("Bus", nodes, location=location, carrier=carrier)
 
-    # initial fossil reserves
-    e_initial = (snakemake.config["fossil_reserves"]).get(carrier, 0) * 1e6
-    # capital cost could be corrected to e.g. 0.2 EUR/kWh * annuity and O&M
-    n.madd(
-        "Store",
-        nodes + " Store",
-        bus=nodes,
-        e_nom_extendable=True,
-        e_cyclic=True if e_initial == 0 else False,
-        carrier=carrier,
-        e_initial=e_initial,
-    )
 
     n.madd(
         "Generator",
@@ -1225,7 +1213,7 @@ def _debug_co2_budget(n, cap, tag=""):
     if injected_positive > float(cap) + 1e-6:
         print("  >>> INFEASIBLE LIKELY: fixed CO2 injection exceeds atmosphere cap")
 
-def add_co2(n, costs):
+def add_co2(n, costs,Nyears):
     "add carbon carrier, it's networks and storage units"
 
     # minus sign because opposite to how fossil fuels used:
@@ -1330,43 +1318,10 @@ def add_co2(n, costs):
             * co2_links.length
         )
         capital_cost = cost_onshore + cost_submarine
-    # --- after you added the CO2 buses/stores/loads ---
     cap = co2_cap_from_config(snakemake.config, investment_year)
-
-    # atmosphere store is only a bookkeeping reservoir, not the policy cap
-    n.stores.loc["co2 atmosphere", "e_min_pu"] = 0.0
-    n.stores.loc["co2 atmosphere", "e_initial"] = 0.0
-    n.stores.loc["co2 atmosphere", "e_nom_extendable"] = True
-    n.stores.loc["co2 atmosphere", "e_nom"] = 0.0
-    n.stores.loc["co2 atmosphere", "e_nom_max"] = np.inf
-    if "capital_cost" in n.stores.columns:
-        n.stores.loc["co2 atmosphere", "capital_cost"] = 0.0
-    if "marginal_cost" in n.stores.columns:
-        n.stores.loc["co2 atmosphere", "marginal_cost"] = 0.0
-    
-    Nyears = float(n.snapshot_weightings.objective.sum()) / 8760.0
-    gc_const = float(cap) * Nyears
-
-    if not n.global_constraints.empty:
-        mask = n.global_constraints.carrier_attribute.fillna("").str.contains("co2", case=False, na=False)
-    else:
-        mask = None
-
-    if mask is not None and mask.any():
-        idx = n.global_constraints.index[mask]
-        n.global_constraints.loc[idx, "constant"] = gc_const
-        n.global_constraints.loc[idx, "sense"] = "<="
-        if "type" in n.global_constraints.columns:
-            n.global_constraints.loc[idx, "type"] = "primary energy"
-    else:
-        n.add(
-            "GlobalConstraint",
-            "CO2Limit",
-            carrier_attribute="co2_emissions",
-            sense="<=",
-            constant=gc_const,
-            type="primary energy",
-        )
+    n.global_constraints.at["CO2Limit", "constant"] = cap * Nyears
+    print(f"[co2] CO2 cap set to {cap:.4g} MWh-equivalent per year (total {cap*Nyears:.4g} over {Nyears} years)")
+    print(n.global_constraints.at["CO2Limit", "constant"])
 
 def rescale_to_mapping(p_set_series, mapping):
 
@@ -1485,6 +1440,7 @@ def add_aviation(n, costs):
         if corr_aviation:
             intl_av=intl_av.fillna(0.0)*ASEAN_corr
         aviation_demand = float((dom_av.fillna(0.0) + intl_av.fillna(0.0)).sum())
+        print("int bunkers included in aviation demand calculation")
     else:
         aviation_demand = float(dom_av.sum())
 
@@ -1520,28 +1476,8 @@ def add_aviation(n, costs):
         p_set=airports["p_set"].reindex(pd.Index(spatial.nodes).astype(str)).fillna(0.0).values,
     )
 
-    if snakemake.config["sector"]["international_bunkers"]:
-        co2 = float(airports["p_set"].sum()) * costs.at["oil", "CO2 intensity"]
-        print("[aviation] CO2 emissions from international bunkers:", co2)
-    else:
-        dom = energy_totals["total domestic aviation"].fillna(0.0)
-        intl = energy_totals["total international aviation"].fillna(0.0)
-        den = dom + intl
-
-        domestic_to_total = pd.Series(0.0, index=energy_totals.index)
-        m = den > 0
-        domestic_to_total.loc[m] = dom.loc[m] / den.loc[m]
-
-        iso2 = pd.Index(airports.index.astype(str)).str.extract(r"^([A-Z]{2})", expand=False)
-        airports2 = airports.copy()
-        airports2["iso2"] = iso2
-        p_by_country = airports2.groupby("iso2")["p_set"].sum()
-        share = domestic_to_total.reindex(p_by_country.index).fillna(0.0)
-        oil_intensity = costs.at["oil", "CO2 intensity"]
-        co2 = float((p_by_country * oil_intensity * share).sum())
-
-        print("[aviation] CO2 emissions from domestic aviation:", co2)
-
+    
+    co2 = float(airports["p_set"].sum()) * costs.at["oil", "CO2 intensity"]
     n.add(
         "Load",
         "aviation oil emissions",
@@ -1549,6 +1485,7 @@ def add_aviation(n, costs):
         carrier="oil emissions",
         p_set=-co2,
     )
+    print("[aviation] CO2 emissions from domestic aviation:", co2)
 
 def add_storage(n, costs):
     "function to add the different types of storage systems"
@@ -1572,10 +1509,12 @@ def add_storage(n, costs):
         e_cyclic=True,
         e_nom_extendable=True,
         carrier="battery",
-        capital_cost=costs.at["battery storage", "fixed"],
+        capital_cost=0,#costs.at["battery storage", "fixed"],
         lifetime=costs.at["battery storage", "lifetime"],
     )
-
+    print(f"Battery costs= {costs.at['battery storage', 'fixed']}")
+    print(f"Inverter costs= {costs.at['battery inverter', 'fixed']}")
+    
     n.madd(
         "Link",
         spatial.nodes + " battery charger",
@@ -1781,6 +1720,7 @@ def add_shipping(n, costs):
             intl_nav= intl_nav * correction_ASEAN
         
         navigation_demand = float((dom_nav + intl_nav).sum())
+        print("int bunkers included in shipping demand calculation")
 
     else:
         navigation_demand = float(dom_nav.sum())
@@ -1809,28 +1749,6 @@ def add_shipping(n, costs):
     ports = ports.groupby(ports.index).sum(numeric_only=True)
     ports = ports.reindex(ind).copy()
     ports["p_set"] = ports["p_set"].fillna(0.0)
-
-    # ensure oil buses/stores/gens exist BEFORE adding oil loads
-    if "oil" not in n.buses.carrier.unique():
-        n.madd("Bus", spatial.oil.nodes, location=spatial.oil.locations, carrier="oil")
-    if "oil" not in n.stores.carrier.unique():
-        n.madd(
-            "Store",
-            [oil_bus + " Store" for oil_bus in spatial.oil.nodes],
-            bus=spatial.oil.nodes,
-            e_nom_extendable=True,
-            e_cyclic=True,
-            carrier="oil",
-        )
-    if "oil" not in n.generators.carrier.unique():
-        n.madd(
-            "Generator",
-            spatial.oil.nodes,
-            bus=spatial.oil.nodes,
-            p_nom_extendable=True,
-            carrier="oil",
-            marginal_cost=costs.at["oil", "fuel"],
-        )
 
     # liquefaction block unchanged
     if options.get("shipping_hydrogen_liquefaction", False):
@@ -1879,29 +1797,9 @@ def add_shipping(n, costs):
             carrier="shipping oil",
             p_set=ports_oil["p_set"].reindex(pd.Index(spatial.nodes).astype(str)).fillna(0.0).values,
         )
-
-        if snakemake.config["sector"]["international_bunkers"]:
-            co2 = float(ports_oil["p_set"].sum()) * costs.at["oil", "CO2 intensity"]
-        else:
-            # --- PATCH: use navigation series (your old block used aviation once) ---
-            dom = energy_totals["total domestic navigation"].fillna(0.0)
-            intl = energy_totals["total international navigation"].fillna(0.0)
-            den = dom + intl
-
-            domestic_to_total = pd.Series(0.0, index=energy_totals.index)
-            m = den > 0
-            domestic_to_total.loc[m] = dom.loc[m] / den.loc[m]
-
-            iso2 = pd.Index(ports_oil.index.astype(str)).str.extract(r"^([A-Z]{2})", expand=False)
-            tmp = ports_oil.copy()
-            tmp["iso2"] = iso2
-            p_by_country = tmp.groupby("iso2")["p_set"].sum()
-            share = domestic_to_total.reindex(p_by_country.index).fillna(0.0)
-            oil_intensity = costs.at["oil", "CO2 intensity"]
-            co2 = float((p_by_country * oil_intensity * share).sum())
-
-        n.add(
-            "Load",
+        
+        co2 = float(ports_oil["p_set"].sum()) * costs.at["oil", "CO2 intensity"]
+        n.add("Load",
             "shipping oil emissions",
             bus="co2 atmosphere",
             carrier="shipping oil emissions",
@@ -3987,7 +3885,7 @@ if __name__ == "__main__":
     else:
         existing_capacities, existing_efficiencies, existing_nodes = 0, None, None
 
-    add_co2(n, costs)  # TODO add costs
+    add_co2(n, costs,Nyears)  # TODO add costs
     cap_cfg = snakemake.config["custom_RE_cap"]
     if cap_cfg.get("enable", False):
 

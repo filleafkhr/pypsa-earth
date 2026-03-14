@@ -445,6 +445,8 @@ costs:
   future_exchange_rate_strategy: "reference" # reference uses the exchange rate from `reference_year` for all conversions, ensuring all costs are expressed in the same currency and year; "latest" uses the yearly average of the latest available exchange rates for the selected `output_currency`; "custom" allows to specify a `custom_future_exchange_rate` below
   custom_future_exchange_rate: None # if `future_exchange_rate_strategy: "custom"`, please insert here the desired output_currency-to-EUR exchange rate
   rooftop_share: 0.14 # based on the potentials, assuming (0.1 kW/m2 and 10 m2/person)
+  append_cost_data: True
+  regional_factor: False
   fill_values:
     FOM: 0
     VOM: 0
@@ -812,7 +814,7 @@ sector:
 solving:
   options:
     formulation: kirchhoff
-    load_shedding: true
+    load_shedding: false
     add_lv_buffer: false
     noisy_costs: true
     min_iterations: 4
@@ -1139,21 +1141,12 @@ feature_switches:
   storage_country_rules: false      # ON/OFF button
 
 gas_trade:
-  importers: ["ID","PH","VN"]
-  exporters: ["MY","BN"]
-  # how to adjust when importer/exporter
+  importers: ["KH","LA","MM","PH","SG","TH","VN"] 
+  exporters: ["ID","MY","MM","BN"]
   importer_adjustment:
-    fuel_marginal_cost_add: 3.0     # €/MWh_fuel added to gas fuel generators
-    ccgt_vom_add: 0.3               # €/MWh_e added to CCGT link marginal_cost (optional)
-    ocgt_vom_add: 0.3
-    ccgt_capex_mult: 1.05           # +5% capex (optional)
-    ocgt_capex_mult: 1.05
+    fuel_marginal_cost_mult: 1.125   # +12.5%
   exporter_adjustment:
-    fuel_marginal_cost_add: -2.0
-    ccgt_vom_add: -0.2
-    ocgt_vom_add: -0.2
-    ccgt_capex_mult: 0.97
-    ocgt_capex_mult: 0.97
+    fuel_marginal_cost_mult: 0.875   # -12.5%
 
 storage_rules:
   # country-specific storage toggles or cost tweaks
