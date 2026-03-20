@@ -160,7 +160,6 @@ if __name__ == "__main__":
                 .fillna(0)
                 .astype(bool)
             )
-    mask_lines = n.lines["from_transmission_project"].fillna(False)
-    mask_links = n.links["from_transmission_project"].fillna(False)
+
 
     n.export_to_netcdf(snakemake.output[0])

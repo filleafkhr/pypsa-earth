@@ -255,7 +255,7 @@ sector:
     spatial_lignite: true
 
 feature_switches:
-  gas_trade_adjustments: True 
+  gas_trade_adjustments: False 
 
 focus_weights:
   BN: 0.0
@@ -283,10 +283,10 @@ transmission_projects:
   enable: true
   include:
     EO8 - Complete: true
-    ID-Supergrid: true
+    ID-Supergrid: false
   status:
-  - in_planning
-  - under_consideration
+  #- in_planning
+  #- under_consideration
   - existing
   new_link_capacity: keep #keep or zero
   distance_upper_bound: 0.3

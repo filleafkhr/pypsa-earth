@@ -308,59 +308,222 @@ def enforce_autarky(n, only_crossborder=False):
         links_rm = n.links.loc[n.links.carrier == "DC"].index
     n.mremove("Line", lines_rm)
     n.mremove("Link", links_rm)
+def set_line_nom_max(
+    n,
+    s_nom_max_set=np.inf,
+    p_nom_max_set=np.inf,
+    print_changes=True,
+    print_intercountry=True,
+    drop_unlabeled_inf_intercountry=True,
+):
 
+    bus_country = n.buses["country"]
+    line_c0 = n.lines["bus0"].map(bus_country)
+    line_c1 = n.lines["bus1"].map(bus_country)
+    link_c0 = n.links["bus0"].map(bus_country)
+    link_c1 = n.links["bus1"].map(bus_country)
 
-def set_line_nom_max(n, s_nom_max_set=np.inf, p_nom_max_set=np.inf, print_changes=True):
-    line_mask = (
+    intercountry_lines = (
+        line_c0.notna() & line_c1.notna() &
+        (line_c0 != "") & (line_c1 != "") &
+        (line_c0 != line_c1)
+    )
+
+    intercountry_links = (
+        link_c0.notna() & link_c1.notna() &
+        (link_c0 != "") & (link_c1 != "") &
+        (link_c0 != link_c1)
+    )
+
+    project_lines = (
         n.lines["from_transmission_project"].fillna(0).astype(float).eq(1)
         if "from_transmission_project" in n.lines.columns
         else pd.Series(False, index=n.lines.index)
     )
 
-    link_mask = (
+    project_links = (
         n.links["from_transmission_project"].fillna(0).astype(float).eq(1)
         if "from_transmission_project" in n.links.columns
         else pd.Series(False, index=n.links.index)
     )
 
+    # optional: drop suspicious intercountry non-project assets with infinite max
+    if drop_unlabeled_inf_intercountry:
+        drop_line_mask = (
+            intercountry_lines
+            & (~project_lines)
+            & np.isinf(n.lines["s_nom_max"].fillna(np.inf))
+        )
+        drop_link_mask = (
+            intercountry_links
+            & (~project_links)
+            & np.isinf(n.links["p_nom_max"].fillna(np.inf))
+        )
+
+        if drop_line_mask.any():
+            print("\n=== dropping intercountry non-project lines with s_nom_max = inf ===")
+            print(
+                pd.DataFrame({
+                    "country0": line_c0[drop_line_mask],
+                    "country1": line_c1[drop_line_mask],
+                    "bus0": n.lines.loc[drop_line_mask, "bus0"],
+                    "bus1": n.lines.loc[drop_line_mask, "bus1"],
+                    "s_nom": n.lines.loc[drop_line_mask, "s_nom"],
+                    "s_nom_max": n.lines.loc[drop_line_mask, "s_nom_max"],
+                }).to_string()
+            )
+            n.lines.drop(index=n.lines.index[drop_line_mask], inplace=True)
+
+        if drop_link_mask.any():
+            print("\n=== dropping intercountry non-project links with p_nom_max = inf ===")
+            print(
+                pd.DataFrame({
+                    "country0": link_c0[drop_link_mask],
+                    "country1": link_c1[drop_link_mask],
+                    "bus0": n.links.loc[drop_link_mask, "bus0"],
+                    "bus1": n.links.loc[drop_link_mask, "bus1"],
+                    "p_nom": n.links.loc[drop_link_mask, "p_nom"],
+                    "p_nom_max": n.links.loc[drop_link_mask, "p_nom_max"],
+                }).to_string()
+            )
+            n.links.drop(index=n.links.index[drop_link_mask], inplace=True)
+
+        # recompute after dropping
+        bus_country = n.buses["country"]
+        line_c0 = n.lines["bus0"].map(bus_country)
+        line_c1 = n.lines["bus1"].map(bus_country)
+        link_c0 = n.links["bus0"].map(bus_country)
+        link_c1 = n.links["bus1"].map(bus_country)
+
+        intercountry_lines = (
+            line_c0.notna() & line_c1.notna() &
+            (line_c0 != "") & (line_c1 != "") &
+            (line_c0 != line_c1)
+        )
+
+        intercountry_links = (
+            link_c0.notna() & link_c1.notna() &
+            (link_c0 != "") & (link_c1 != "") &
+            (link_c0 != link_c1)
+        )
+
+        project_lines = (
+            n.lines["from_transmission_project"].fillna(0).astype(float).eq(1)
+            if "from_transmission_project" in n.lines.columns
+            else pd.Series(False, index=n.lines.index)
+        )
+
+        project_links = (
+            n.links["from_transmission_project"].fillna(0).astype(float).eq(1)
+            if "from_transmission_project" in n.links.columns
+            else pd.Series(False, index=n.links.index)
+        )
+
+    line_mask = project_lines | intercountry_lines
+    link_mask = project_links | intercountry_links
+
     changed_lines = pd.DataFrame(index=n.lines.index[line_mask])
     changed_links = pd.DataFrame(index=n.links.index[link_mask])
 
-    if line_mask.any() and not np.isinf(s_nom_max_set):
+    if line_mask.any():
+        changed_lines["country0"] = line_c0[line_mask]
+        changed_lines["country1"] = line_c1[line_mask]
+        changed_lines["is_intercountry"] = intercountry_lines[line_mask]
+        changed_lines["is_project"] = project_lines[line_mask]
         changed_lines["s_nom"] = n.lines.loc[line_mask, "s_nom"]
         changed_lines["s_nom_max_before"] = n.lines.loc[line_mask, "s_nom_max"]
 
-        n.lines.loc[line_mask, "s_nom_max"] = np.where(
-            n.lines.loc[line_mask, "s_nom"].fillna(0) > 0,
-            n.lines.loc[line_mask, "s_nom"] * s_nom_max_set,
-            0.0,
-        )
+        if np.isinf(s_nom_max_set):
+            n.lines.loc[line_mask, "s_nom_max"] = np.inf
+        else:
+            n.lines.loc[line_mask, "s_nom_max"] = np.where(
+                n.lines.loc[line_mask, "s_nom"].fillna(0) > 0,
+                n.lines.loc[line_mask, "s_nom"].fillna(0) * s_nom_max_set,
+                0.0,
+            )
+
         changed_lines["s_nom_max_after"] = n.lines.loc[line_mask, "s_nom_max"]
 
-    if link_mask.any() and not np.isinf(p_nom_max_set):
+    if link_mask.any():
+        changed_links["country0"] = link_c0[link_mask]
+        changed_links["country1"] = link_c1[link_mask]
+        changed_links["is_intercountry"] = intercountry_links[link_mask]
+        changed_links["is_project"] = project_links[link_mask]
         changed_links["p_nom"] = n.links.loc[link_mask, "p_nom"]
         changed_links["p_nom_max_before"] = n.links.loc[link_mask, "p_nom_max"]
 
-        n.links.loc[link_mask, "p_nom_max"] = np.where(
-            n.links.loc[link_mask, "p_nom"].fillna(0) > 0,
-            n.links.loc[link_mask, "p_nom"] * p_nom_max_set,
-            0.0,
-        )
+        if np.isinf(p_nom_max_set):
+            n.links.loc[link_mask, "p_nom_max"] = np.inf
+        else:
+            n.links.loc[link_mask, "p_nom_max"] = np.where(
+                n.links.loc[link_mask, "p_nom"].fillna(0) > 0,
+                n.links.loc[link_mask, "p_nom"].fillna(0) * p_nom_max_set,
+                0.0,
+            )
 
         changed_links["p_nom_max_after"] = n.links.loc[link_mask, "p_nom_max"]
 
     if print_changes:
-        print("\n=== changed project lines ===")
+        print("\n=== changed lines (project OR intercountry) ===")
         if changed_lines.empty:
             print("none")
         else:
             print(changed_lines.to_string())
-        print("\n=== changed project links ===")
+
+        print("\n=== changed links (project OR intercountry) ===")
         if changed_links.empty:
             print("none")
         else:
             print(changed_links.to_string())
 
+    if print_intercountry:
+        print("\n=== all intercountry lines: s_nom vs s_nom_max ===")
+        if intercountry_lines.any():
+            inter_lines_df = pd.DataFrame({
+                "country0": line_c0[intercountry_lines],
+                "country1": line_c1[intercountry_lines],
+                "bus0": n.lines.loc[intercountry_lines, "bus0"],
+                "bus1": n.lines.loc[intercountry_lines, "bus1"],
+                "from_transmission_project": (
+                    n.lines.loc[intercountry_lines, "from_transmission_project"]
+                    if "from_transmission_project" in n.lines.columns
+                    else 0
+                ),
+                "s_nom": n.lines.loc[intercountry_lines, "s_nom"],
+                "s_nom_max": n.lines.loc[intercountry_lines, "s_nom_max"],
+                "s_nom_extendable": (
+                    n.lines.loc[intercountry_lines, "s_nom_extendable"]
+                    if "s_nom_extendable" in n.lines.columns
+                    else np.nan
+                ),
+            })
+            print(inter_lines_df.to_string())
+        else:
+            print("none")
+
+        print("\n=== all intercountry links: p_nom vs p_nom_max ===")
+        if intercountry_links.any():
+            inter_links_df = pd.DataFrame({
+                "country0": link_c0[intercountry_links],
+                "country1": link_c1[intercountry_links],
+                "bus0": n.links.loc[intercountry_links, "bus0"],
+                "bus1": n.links.loc[intercountry_links, "bus1"],
+                "from_transmission_project": (
+                    n.links.loc[intercountry_links, "from_transmission_project"]
+                    if "from_transmission_project" in n.links.columns
+                    else 0
+                ),
+                "p_nom": n.links.loc[intercountry_links, "p_nom"],
+                "p_nom_max": n.links.loc[intercountry_links, "p_nom_max"],
+                "p_nom_extendable": (
+                    n.links.loc[intercountry_links, "p_nom_extendable"]
+                    if "p_nom_extendable" in n.links.columns
+                    else np.nan
+                ),
+            })
+            print(inter_links_df.to_string())
+        else:
+            print("none")
 
 if __name__ == "__main__":
     if "snakemake" not in globals():
